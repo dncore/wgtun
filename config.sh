@@ -1,5 +1,5 @@
 #!/bin/bash
-# WireGuard Dashboard — 共享配置
+# wg-service — 共享配置
 # 优先级：环境变量 > .env 文件 > 默认值
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

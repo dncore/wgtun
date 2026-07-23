@@ -1,5 +1,5 @@
 #!/bin/bash
-# WireGuard Dashboard — 健康检查
+# wg-service — 健康检查
 # 每 N 秒由 launchd 触发，接口正常时静默退出。
 # 日志超过 LOG_MAX_SIZE 自动截断。
 

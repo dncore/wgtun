@@ -1,5 +1,5 @@
 #!/bin/bash
-# WireGuard Dashboard — 重启隧道
+# wg-service — 重启隧道
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

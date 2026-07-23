@@ -1,10 +1,10 @@
 #!/bin/bash
-# WireGuard Dashboard — 状态检查
+# wg-service — 状态检查
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
 
-echo "=== WireGuard Dashboard 状态 ==="
+echo "=== wg-service 状态 ==="
 echo ""
 
 # 1. 隧道状态

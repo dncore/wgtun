@@ -1,11 +1,11 @@
 #!/bin/bash
-# WireGuard Dashboard — 一键卸载
+# wg-service — 一键卸载
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
 
-echo "=== WireGuard Dashboard 卸载 ==="
+echo "=== wg-service 卸载 ==="
 echo ""
 
 echo "[1/3] 停止并移除 LaunchDaemon…"

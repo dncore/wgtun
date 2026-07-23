@@ -1,5 +1,5 @@
 #!/bin/bash
-# WireGuard Dashboard — 重建前端并重启 Web UI
+# wg-service — 重建前端并重启 Web UI
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

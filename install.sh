@@ -1,11 +1,11 @@
 #!/bin/bash
-# WireGuard Dashboard — 一键安装
+# wg-service — 一键安装
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
 
-echo "=== WireGuard Dashboard 安装 ==="
+echo "=== wg-service 安装 ==="
 echo ""
 
 # ---- 检查 .env ----

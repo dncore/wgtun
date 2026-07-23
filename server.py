@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WireGuard Dashboard — 轻量 HTTP 服务（带密码鉴权）"""
+"""wg-service — 轻量 HTTP 服务（带密码鉴权）"""
 import json
 import os
 import re
@@ -253,5 +253,5 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     server = HTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"WireGuard Dashboard → http://localhost:{PORT}")
+    print(f"wg-service → http://localhost:{PORT}")
     server.serve_forever()

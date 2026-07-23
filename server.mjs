@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * WireGuard Dashboard — Node.js 后端（备选实现）
+ * wg-service — Node.js 后端（备选实现）
  * 使用方式: node server.mjs
  * 或通过 package.json: npm start
  */
@@ -143,5 +143,5 @@ if (existsSync(clientDist)) {
 // ---- start ----
 app.listen(PORT, () => {
   writeFileSync(UPTIME_FILE, String(Date.now()));
-  console.log(`WireGuard Dashboard → http://localhost:${PORT}`);
+  console.log(`wg-service → http://localhost:${PORT}`);
 });
