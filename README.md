@@ -143,6 +143,13 @@ sudo launchctl list | grep wireguard        # 守护进程状态
 sudo launchctl kickstart -k system/com.wireguard.ui  # 重启 Web 服务
 ```
 
+## ⚠️ 注意事项
+
+- **不要手动运行 `server.py`**。Web UI 由 launchd（`com.wireguard.ui`，KeepAlive）统一管理；
+  手动启动的实例会占用 4623 端口，导致 launchd 实例反复 EADDRINUSE 崩溃并刷爆 `ui.err.log`。
+- 若 UI 异常，healthcheck（每 60s）会自动杀掉无响应的占用进程并重启 UI；
+  所有日志超过 `LOG_MAX_SIZE`（默认 10MB）自动截断。
+
 ## License
 
 MIT
