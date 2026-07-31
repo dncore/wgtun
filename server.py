@@ -6,6 +6,7 @@ import re
 import secrets
 import hashlib
 import subprocess
+import sys
 import time
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
@@ -252,6 +253,17 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = HTTPServer(("127.0.0.1", PORT), Handler)
+    try:
+        server = HTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError as e:
+        if e.errno == 48:  # EADDRINUSE
+            print(
+                f"[ERROR] 端口 {PORT} 已被占用，疑似存在手动启动的实例。"
+                "请先终止旧实例（pkill -f server.py），或统一交由 launchd 管理。",
+                file=sys.stderr,
+            )
+        else:
+            print(f"[ERROR] 无法绑定端口 {PORT}: {e}", file=sys.stderr)
+        sys.exit(1)
     print(f"wg-service → http://localhost:{PORT}")
     server.serve_forever()
