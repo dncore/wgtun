@@ -37,6 +37,8 @@ for iface in "${INTERFACES[@]}"; do
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <key>AbandonProcessGroup</key>
+    <true/>
     <key>StandardErrorPath</key>
     <string>$LOG_DIR/${iface}.err.log</string>
     <key>StandardOutPath</key>
@@ -68,6 +70,8 @@ cat > "$SCRIPT_DIR/com.wireguard.healthcheck.plist" << PLIST_EOF
     <key>StartInterval</key>
     <integer>$HEALTHCHECK_INTERVAL</integer>
     <key>RunAtLoad</key>
+    <true/>
+    <key>AbandonProcessGroup</key>
     <true/>
     <key>StandardErrorPath</key>
     <string>$LOG_DIR/healthcheck.err.log</string>
