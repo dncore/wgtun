@@ -24,6 +24,11 @@ archives:
   - formats: [zip]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
+# Re-runs replace an existing release's assets instead of failing with
+# "already_exists" (keeps the pipeline idempotent).
+release:
+  mode: replace
+
 brews:
   - name: wgtun
     homepage: "https://github.com/dncore/wgtun"
