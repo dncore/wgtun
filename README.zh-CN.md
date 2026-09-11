@@ -103,6 +103,7 @@ wgtun 用两个部件取代这一切：
 ## 安装
 
 ```bash
+brew trust dncore/tap           # 一次性：Homebrew 要求显式信任第三方 tap
 brew install dncore/tap/wgtun   # 依赖 wireguard-go，自动安装
 sudo wgtun daemon --install     # 安装并启动 launchd 守护进程
 wgtun                           # 打开 TUI

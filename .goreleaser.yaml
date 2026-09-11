@@ -32,7 +32,7 @@ release:
 brews:
   - name: wgtun
     homepage: "https://github.com/dncore/wgtun"
-    description: "WireGuard orchestrator: a Go TUI managing wireguard-go instances, with a root launchd daemon. Never shell out to wg again."
+    description: "WireGuard orchestrator: TUI + launchd daemon for wireguard-go"
     license: MIT
     dependencies:
       - wireguard-go

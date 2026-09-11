@@ -105,6 +105,7 @@ daemon info and paths.
 ## Install
 
 ```bash
+brew trust dncore/tap           # one-time: Homebrew requires trusting third-party taps
 brew install dncore/tap/wgtun   # depends on wireguard-go
 sudo wgtun daemon --install     # install + start the launchd daemon
 wgtun                           # open the TUI
