@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -27,8 +28,9 @@ type instancesModel struct {
 	table        table.Model
 	ready        bool
 	needsRefresh bool
-	detail      string // serialized status of the selected instance
-	confirmName string // instance pending delete confirmation; empty = none
+	detail       string           // error text of the last detail fetch
+	detailResp   *wire.StatusResp // live status shown in the detail pane
+	confirmName  string           // instance pending delete confirmation; empty = none
 	confirmAct  tea.Cmd
 	editing     bool // editor is open
 	editor      *editorModel
@@ -143,21 +145,34 @@ func (m *instancesModel) fetchDetail() tea.Cmd {
 		if resp.Error != "" {
 			return detailDoneMsg{text: resp.Error}
 		}
-		return detailDoneMsg{text: m.renderDetail(resp)}
+		return detailDoneMsg{resp: resp}
 	})
 }
 
-type detailDoneMsg struct{ text string }
+type detailDoneMsg struct {
+	text string            // error text when resp is nil
+	resp *wire.StatusResp  // live status, rendered at view time (for i18n)
+}
 
-func (m *instancesModel) renderDetail(resp *wire.StatusResp) string {
+func (m *instancesModel) renderDetail(lang i18n.Lang, resp *wire.StatusResp) string {
 	d := resp.Status
 	if d == nil {
 		return ""
 	}
 	var b string
+	if resp.DevicePublicKey != "" {
+		b += i18n.T(lang, i18n.CardPubKey) + " " + resp.DevicePublicKey + "\n"
+	}
+	if d.ListenPort != 0 {
+		b += i18n.T(lang, i18n.CardListen) + " " + fmt.Sprint(d.ListenPort) + "\n"
+	}
 	for i, p := range d.Peers {
-		b += fmt.Sprintf("peer %d  %s\n", i+1, shortKey(p.PublicKey))
-		age := "never"
+		b += fmt.Sprintf("peer %d  %s", i+1, p.PublicKey)
+		if p.HasPSK {
+			b += "  PSK"
+		}
+		b += "\n"
+		age := i18n.T(lang, i18n.Never)
 		if !p.LastHandshake.IsZero() {
 			age = humanDur(time.Since(p.LastHandshake).Round(time.Second)) + " ago"
 		}
@@ -167,7 +182,7 @@ func (m *instancesModel) renderDetail(resp *wire.StatusResp) string {
 			b += fmt.Sprintf("   allowed-ips %s\n", ip)
 		}
 	}
-	return b
+	return strings.TrimRight(b, "\n")
 }
 
 func shortKey(k string) string {
@@ -243,7 +258,13 @@ func (m *instancesModel) Update(msg tea.Msg) (any, tea.Cmd) {
 			return m, nil
 		}
 	case detailDoneMsg:
-		m.detail = msg.text
+		if msg.resp != nil {
+			m.detailResp = msg.resp
+			m.detail = ""
+		} else {
+			m.detail = msg.text
+			m.detailResp = nil
+		}
 		return m, nil
 	}
 	return m, nil
@@ -332,8 +353,12 @@ func (m *instancesModel) View(lang i18n.Lang, width int) string {
 	var b []string
 	b = append(b, titleStyle.Render(i18n.T(lang, i18n.InstTitle)))
 	b = append(b, m.table.View())
-	if m.detail != "" {
-		b = append(b, "", lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colDim).Padding(0, 1).Render(m.detail))
+	detail := m.detail
+	if m.detailResp != nil {
+		detail = m.renderDetail(lang, m.detailResp)
+	}
+	if detail != "" {
+		b = append(b, "", lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colDim).Padding(0, 1).Render(detail))
 	}
 	if m.confirmName != "" {
 		b = append(b, "", lipgloss.NewStyle().Foreground(colYellow).Render(i18n.T(lang, i18n.ConfirmDelete, m.confirmName)))

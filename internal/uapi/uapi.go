@@ -22,6 +22,8 @@ type PeerStatus struct {
 	PersistentKeepalive int       // seconds
 	LastHandshake       time.Time // zero if never
 	RxBytes, TxBytes    uint64
+	HasPSK              bool // a preshared key is configured (all-zero means none)
+	ProtocolVersion     int  // 0 when the device does not report one
 }
 
 // DeviceStatus is the live state of one device, from get=1.
@@ -204,7 +206,16 @@ func parseGet(resp string) (*DeviceStatus, error) {
 			if peer != nil {
 				peer.TxBytes, _ = strconv.ParseUint(val, 10, 64)
 			}
-		case "protocol_version", "fwmark", "preshared_key":
+		case "preshared_key":
+			if peer != nil {
+				// the protocol always reports the field; all zeros = no PSK
+				peer.HasPSK = strings.Trim(val, "0") != ""
+			}
+		case "protocol_version":
+			if peer != nil {
+				peer.ProtocolVersion, _ = strconv.Atoi(val)
+			}
+		case "fwmark":
 			// parsed for forward-compat, not exposed
 		}
 	}

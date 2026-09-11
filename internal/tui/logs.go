@@ -152,7 +152,8 @@ func (m *logsModel) Update(msg tea.Msg) (any, tea.Cmd) {
 			m.minLevel = logs.Debug
 			m.text = ""
 			m.stopFollow()
-			return m, m.fetch()
+			// clear the filters and reload, with visible feedback either way
+			return m, tea.Batch(m.fetch(), statusCmd(i18n.FilterCleared))
 		case "i":
 			m.stopFollow()
 			m.cycleInstance()

@@ -24,6 +24,7 @@ import (
 type Supervisor interface {
 	Views() []wire.InstanceView
 	LiveStatus(name string) (*uapi.DeviceStatus, time.Time, error)
+	DevicePublicKey(name string) string
 	Conf(name string) (string, error)
 	Start(name string) error
 	Stop(name string) error
@@ -91,6 +92,7 @@ func Serve(sup Supervisor, ev Logger, sockPath string) (*Server, error) {
 			resp.Status = st
 			resp.StatusAge = time.Since(at).Seconds()
 		}
+		resp.DevicePublicKey = sup.DevicePublicKey(name)
 		writeJSON(w, resp)
 	})
 	mux.HandleFunc("GET /instances/{name}/conf", func(w http.ResponseWriter, r *http.Request) {

@@ -132,7 +132,7 @@ func newApp() *app {
 		inst:   newInstances(),
 		logs:   newLogs(),
 		settings: newSettings(lang),
-		status: i18n.T(lang, i18n.StatusBusy),
+		status: "", // set once an action reports something
 	}
 }
 

@@ -33,10 +33,11 @@ type inst struct {
 	confPath string
 	conf     *wgconf.Config
 
-	pid      int
-	tun      string // utunN
-	adopted  bool   // true when the process was started by a previous daemon
+	pid       int
+	tun       string // utunN
+	adopted   bool   // true when the process was started by a previous daemon
 	startedAt time.Time
+	devicePub string // base64 public key derived from the config's private key
 
 	restarts    []time.Time // restart attempts for backoff
 	nextAttempt time.Time
@@ -115,6 +116,7 @@ func (s *Supervisor) loadConfigsLocked() error {
 			continue
 		}
 		cur.confPath, cur.conf = path, conf
+		cur.devicePub = "" // private key may have changed; re-derive lazily
 	}
 	for name, i := range s.insts {
 		if !seen[name] {
@@ -141,6 +143,18 @@ func loadConfFile(path string) (*wgconf.Config, error) {
 		return nil, err
 	}
 	return conf, nil
+}
+
+// devicePublicKey returns the base64 public key derived from the instance's
+// private key, or "" when it cannot be derived.
+func (i *inst) devicePublicKey() string {
+	if i.devicePub != "" {
+		return i.devicePub
+	}
+	if pub, err := wgconf.PublicKeyOf(i.conf.Interface.PrivateKey); err == nil {
+		i.devicePub = pub
+	}
+	return i.devicePub
 }
 
 // BootInit applies boot semantics. freshBoot is true when the daemon starts
@@ -590,6 +604,16 @@ func (s *Supervisor) LiveStatus(name string) (*uapi.DeviceStatus, time.Time, err
 		return nil, time.Time{}, fmt.Errorf("instance %q not running", name)
 	}
 	return i.status, i.statusAt, nil
+}
+
+// DevicePublicKey returns the derived public key of one instance.
+func (s *Supervisor) DevicePublicKey(name string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if i, ok := s.insts[name]; ok {
+		return i.devicePublicKey()
+	}
+	return ""
 }
 
 // Conf returns the parsed config of one instance (for the editor).

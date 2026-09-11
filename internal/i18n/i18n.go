@@ -41,6 +41,10 @@ const (
 	CardPeers       = "card.peers"
 	CardEndpoint    = "card.endpoint"
 	CardTun         = "card.tun"
+	CardListen      = "card.listen"
+	CardPubKey      = "card.pubKey"
+	CardAllowed     = "card.allowed"
+	CardNone        = "card.none"
 	Never           = "time.never"
 	HandshakeNow    = "time.handshakeNow"
 	HandshakeAgo    = "time.handshakeAgo" // args: duration
@@ -117,6 +121,7 @@ const (
 	LogsNoEvents    = "logs.noEvents"
 	KeyFollow       = "key.follow"
 	KeyClearFilter  = "key.clearFilter"
+	FilterCleared   = "logs.filterCleared"
 	LevelDebug      = "level.debug"
 	LevelInfo       = "level.info"
 	LevelWarn       = "level.warn"
@@ -155,6 +160,7 @@ var tables = map[Lang]map[string]string{
 		StatRunning: "Running", StatTotal: "Total", StatOnline: "Online peers", StatTraffic: "Total traffic",
 		CardUp: "UP", CardDown: "DOWN", CardHandshake: "handshake", CardRx: "rx", CardTx: "tx",
 		CardPeers: "peers", CardEndpoint: "endpoint", CardTun: "tun",
+		CardListen: "listen", CardPubKey: "pub", CardAllowed: "allowed", CardNone: "—",
 		Never: "never", HandshakeNow: "just now", HandshakeAgo: "%s ago",
 		NoInstances: "No instances configured yet — press n in the Instances tab to create one.",
 		DaemonOffline: "daemon offline", DaemonReconnecting: "reconnecting…",
@@ -180,6 +186,7 @@ var tables = map[Lang]map[string]string{
 		LogsTitle: "Logs", LogsAll: "all", LogsFollow: "follow", LogsPause: "paused",
 		LogsFilter: "filter", LogsNoEvents: "no events match",
 		KeyFollow: "follow/pause", KeyClearFilter: "clear filter",
+		FilterCleared: "filters cleared, reloaded",
 		LevelDebug: "DEBUG", LevelInfo: "INFO", LevelWarn: "WARN", LevelError: "ERROR",
 		SettingsTitle: "Settings", SettingsLang: "Language", SettingsLangDesc: "switch UI language",
 		LangEn: "English", LangZh: "中文",
@@ -195,6 +202,7 @@ var tables = map[Lang]map[string]string{
 		StatRunning: "运行中", StatTotal: "总数", StatOnline: "在线 peer", StatTraffic: "总流量",
 		CardUp: "运行", CardDown: "停止", CardHandshake: "握手", CardRx: "收", CardTx: "发",
 		CardPeers: "peer", CardEndpoint: "端点", CardTun: "接口",
+		CardListen: "监听", CardPubKey: "公钥", CardAllowed: "允许", CardNone: "—",
 		Never: "从未", HandshakeNow: "刚刚", HandshakeAgo: "%s 前",
 		NoInstances: "还没有实例 — 在「实例」页按 n 创建",
 		DaemonOffline: "daemon 离线", DaemonReconnecting: "重连中…",
@@ -220,6 +228,7 @@ var tables = map[Lang]map[string]string{
 		LogsTitle: "日志", LogsAll: "全部", LogsFollow: "跟随", LogsPause: "已暂停",
 		LogsFilter: "过滤", LogsNoEvents: "没有匹配的事件",
 		KeyFollow: "跟随/暂停", KeyClearFilter: "清除过滤",
+		FilterCleared: "过滤器已清除，已重新加载",
 		LevelDebug: "调试", LevelInfo: "信息", LevelWarn: "警告", LevelError: "错误",
 		SettingsTitle: "设置", SettingsLang: "语言", SettingsLangDesc: "切换界面语言",
 		LangEn: "English", LangZh: "中文",

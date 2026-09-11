@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/dncore/wg-service/internal/api"
 	"github.com/dncore/wg-service/internal/i18n"
+	"github.com/dncore/wg-service/internal/uapi"
 	"github.com/dncore/wg-service/internal/wire"
 )
 
@@ -124,12 +127,32 @@ func (m *dashboardModel) View(lang i18n.Lang, width int) string {
 	)
 	b = append(b, stats)
 
-	// per-instance cards, two per row
-	var cards []string
-	for _, v := range m.views {
-		cards = append(cards, m.renderCard(lang, v))
+	// per-instance cards, two per row; every card in a row is padded to the
+	// tallest one so the layout never jumps as data refreshes
+	const perRow = 2
+	var cardRows []string
+	for i := 0; i < len(m.views); i += perRow {
+		end := i + perRow
+		if end > len(m.views) {
+			end = len(m.views)
+		}
+		var cards []string
+		maxH := 0
+		for _, v := range m.views[i:end] {
+			c := m.renderCard(lang, v)
+			if h := lipgloss.Height(c); h > maxH {
+				maxH = h
+			}
+			cards = append(cards, c)
+		}
+		for j := range cards {
+			if lipgloss.Height(cards[j]) < maxH {
+				cards[j] = lipgloss.NewStyle().Height(maxH).Render(cards[j])
+			}
+		}
+		cardRows = append(cardRows, lipgloss.JoinHorizontal(lipgloss.Top, cards...))
 	}
-	b = append(b, cardsContainer.Render(lipgloss.JoinHorizontal(lipgloss.Top, cards...)))
+	b = append(b, cardsContainer.Render(lipgloss.JoinVertical(lipgloss.Left, cardRows...)))
 	return lipgloss.JoinVertical(lipgloss.Left, b...)
 }
 
@@ -144,64 +167,130 @@ func statTile(label, value string, color lipgloss.Color) string {
 		))
 }
 
+// cardWidth is the inner text width available inside cardStyle.
+const cardWidth = 34
+
+// peerLines is the fixed row count per peer block; the card height only
+// depends on the (stable) peer count, never on which fields have data.
+const peerLines = 4
+
 func (m *dashboardModel) renderCard(lang i18n.Lang, v wire.InstanceView) string {
+	resp := m.statuses[v.Name]
+	var dev *uapi.DeviceStatus
+	if resp != nil {
+		dev = resp.Status
+	}
+
 	state := i18n.T(lang, i18n.InstStopped)
 	c := stateColor(false)
 	if v.Running {
 		state = i18n.T(lang, i18n.InstRunning)
 		c = stateColor(true)
 	}
-	head := fmt.Sprintf("%s  %s",
+	tun := v.Tun
+	if tun == "" {
+		tun = "-"
+	}
+	rows := []string{fmt.Sprintf("%s  %s  %s",
 		lipgloss.NewStyle().Bold(true).Render(v.Name),
-		lipgloss.NewStyle().Foreground(c).Render(state))
-	rows := []string{head}
+		lipgloss.NewStyle().Foreground(c).Render(state),
+		subtle.Render(tun))}
 
-	if st := m.statuses[v.Name]; st != nil && st.Status != nil {
-		dev := st.Status
-		// newest handshake across peers
-		var newest time.Time
-		for _, p := range dev.Peers {
-			if p.LastHandshake.After(newest) {
-				newest = p.LastHandshake
+	// interface line: listen port + derived device public key
+	listen := "-"
+	pub := "-"
+	if dev != nil && dev.ListenPort != 0 {
+		listen = strconv.Itoa(dev.ListenPort)
+	}
+	if resp != nil && resp.DevicePublicKey != "" {
+		pub = shortKey(resp.DevicePublicKey)
+	}
+	rows = append(rows, fmt.Sprintf("%s %s  %s %s",
+		subtle.Render(i18n.T(lang, i18n.CardListen)), listen,
+		subtle.Render(i18n.T(lang, i18n.CardPubKey)), pub))
+
+	// peer blocks, fixed height each
+	var peers []uapi.PeerStatus
+	if dev != nil {
+		peers = dev.Peers
+	}
+	for i := 0; i < v.PeerCount; i++ {
+		if i < len(peers) {
+			rows = append(rows, m.peerRows(lang, i, peers[i])...)
+		} else {
+			// placeholder keeps the height stable while data is loading
+			rows = append(rows, fmt.Sprintf("● peer %d", i+1))
+			for j := 1; j < peerLines; j++ {
+				rows = append(rows, "")
 			}
 		}
-		var ageStr string
-		switch {
-		case newest.IsZero():
-			ageStr = i18n.T(lang, i18n.Never)
-		case time.Since(newest) <= 2*time.Minute:
-			ageStr = lipgloss.NewStyle().Foreground(colGreen).Render(i18n.T(lang, i18n.HandshakeNow))
-		default:
-			age := time.Since(newest).Round(time.Second)
-			ageStr = lipgloss.NewStyle().Foreground(handshakeAgeToColor(age)).Render(i18n.T(lang, i18n.HandshakeAgo, humanDur(age)))
-		}
-		rows = append(rows, subtle.Render(i18n.T(lang, i18n.CardHandshake)+": ")+ageStr)
-
-		var rx, tx uint64
-		online := 0
-		cut := time.Now().Add(-3 * time.Minute)
-		for _, p := range dev.Peers {
-			rx += p.RxBytes
-			tx += p.TxBytes
-			if p.LastHandshake.After(cut) {
-				online++
-			}
-		}
-		rows = append(rows,
-			subtle.Render(i18n.T(lang, i18n.CardRx)+" "+humanBytes(rx)+"  "+
-				subtle.Render(i18n.T(lang, i18n.CardTx)+" "+humanBytes(tx))),
-			fmt.Sprintf("%s %d/%d  %s %s",
-				subtle.Render(i18n.T(lang, i18n.CardPeers)), online, len(dev.Peers),
-				subtle.Render(i18n.T(lang, i18n.CardTun)), v.Tun),
-		)
-	} else if v.Running {
-		rows = append(rows, subtle.Render(i18n.T(lang, i18n.CardTun)+": "+v.Tun))
 	}
 
+	// sparkline area, fixed height (asciigraph Height(4) + caption = 5 rows)
 	if hist, ok := m.history[v.Name]; ok && hist.plot != "" {
-		rows = append(rows, hist.plot)
+		rows = append(rows, strings.Split(hist.plot, "\n")...)
+	} else {
+		for i := 0; i < 5; i++ {
+			rows = append(rows, "")
+		}
 	}
 	return cardStyle.Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
+}
+
+// peerRows renders exactly peerLines rows for one peer.
+// Truncation only ever applies to plain text: cutting a styled string would
+// slice through an ANSI escape and garble the output.
+func (m *dashboardModel) peerRows(lang i18n.Lang, idx int, p uapi.PeerStatus) []string {
+	suffixPlain := ""
+	if p.HasPSK {
+		suffixPlain += " PSK"
+	}
+	if p.PersistentKeepalive > 0 {
+		suffixPlain += fmt.Sprintf(" ka%d", p.PersistentKeepalive)
+	}
+	head := truncateRunes(fmt.Sprintf("● peer %d  %s", idx+1, shortKey(p.PublicKey)),
+		cardWidth-len([]rune(suffixPlain)))
+	if p.HasPSK {
+		head += " " + lipgloss.NewStyle().Foreground(colGreen).Render("PSK")
+	}
+	if p.PersistentKeepalive > 0 {
+		head += " " + subtle.Render(fmt.Sprintf("ka%d", p.PersistentKeepalive))
+	}
+
+	endpoint := p.Endpoint
+	if endpoint == "" {
+		endpoint = i18n.T(lang, i18n.CardNone)
+	}
+	allowed := strings.Join(p.AllowedIPs, ", ")
+	if allowed == "" {
+		allowed = i18n.T(lang, i18n.CardNone)
+	}
+
+	hs := i18n.T(lang, i18n.Never)
+	switch {
+	case p.LastHandshake.IsZero():
+	case time.Since(p.LastHandshake) <= 2*time.Minute:
+		hs = lipgloss.NewStyle().Foreground(colGreen).Render(i18n.T(lang, i18n.HandshakeNow))
+	default:
+		age := time.Since(p.LastHandshake).Round(time.Second)
+		hs = lipgloss.NewStyle().Foreground(handshakeAgeToColor(age)).Render(i18n.T(lang, i18n.HandshakeAgo, humanDur(age)))
+	}
+
+	return []string{
+		head,
+		"  " + subtle.Render("endpoint ") + truncateRunes(endpoint, cardWidth-11),
+		"  " + subtle.Render("allowed  ") + truncateRunes(allowed, cardWidth-11),
+		"  " + hs + subtle.Render("  rx "+humanBytes(p.RxBytes)+" tx "+humanBytes(p.TxBytes)),
+	}
+}
+
+// truncateRunes shortens s to at most n display runes.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n || n < 2 {
+		return s
+	}
+	return string(r[:n-1]) + "…"
 }
 
 func humanBytes(n uint64) string {

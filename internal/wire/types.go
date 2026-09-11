@@ -36,8 +36,11 @@ type StateInfo struct {
 
 // StatusResp is the live status of one running instance.
 type StatusResp struct {
-	View      InstanceView      `json:"view"`
+	View      InstanceView       `json:"view"`
 	Status    *uapi.DeviceStatus `json:"status,omitempty"`
-	StatusAge float64           `json:"statusAgeSec,omitempty"`
-	Error     string            `json:"error,omitempty"`
+	StatusAge float64            `json:"statusAgeSec,omitempty"`
+	// DevicePublicKey is derived by the daemon from the config's private
+	// key (get=1 does not expose it). Public data, safe to show.
+	DevicePublicKey string `json:"devicePublicKey,omitempty"`
+	Error           string `json:"error,omitempty"`
 }

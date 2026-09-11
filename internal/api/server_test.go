@@ -39,6 +39,9 @@ type notRunning struct{ name string }
 func (e *notRunning) Error() string { return "instance not running: " + e.name }
 
 func (f *fakeSup) Conf(name string) (string, error) { return f.confs[name], nil }
+func (f *fakeSup) DevicePublicKey(name string) string {
+	return "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+}
 func (f *fakeSup) Start(name string) error          { f.lastAct = "up:" + name; return nil }
 func (f *fakeSup) Stop(name string) error           { f.lastAct = "down:" + name; return nil }
 func (f *fakeSup) Restart(name string) error        { f.lastAct = "restart:" + name; return nil }
