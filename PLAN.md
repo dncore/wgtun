@@ -1,8 +1,8 @@
-# wg-service v2 重构方案 — wireguard-go 编排器（Go TUI）
+# wgtun v2 重构方案 — wireguard-go 编排器（Go TUI）
 
 ## 定性
 
-用 Go 重写整个项目：单二进制 `wgs`（bubbletea TUI，普通用户运行）+ root 权限
+用 Go 重写整个项目：单二进制 `wgtun`（bubbletea TUI，普通用户运行）+ root 权限
 daemon（launchd 常驻，编排 wireguard-go 子进程），brew 分发。彻底替换现有
 shell 脚本 + Python Web UI 体系（此前的僵尸进程 / already exists 死锁 /
 日志无时间戳等问题的结构性根因一并消除）。
@@ -11,8 +11,8 @@ shell 脚本 + Python Web UI 体系（此前的僵尸进程 / already exists 死
 
 ```
 ┌─────────────┐  HTTP over Unix socket   ┌─────────────────────────────┐
-│  wgs (TUI)  │◄─────────────────────────►│  wgs daemon (root)          │
-│  bubbletea  │   /var/run/wgs.sock       │  launchd com.wgs.daemon     │
+│  wgtun (TUI)  │◄─────────────────────────►│  wgtun daemon (root)          │
+│  bubbletea  │   /var/run/wgtun.sock       │  launchd com.wgtun.daemon     │
 │  普通用户    │   (root:admin 0660)       │  ├ 实例监督器(reconcile)     │
 └─────────────┘                           │  │   └ wireguard-go 子进程×N │
                                           │  ├ wgctrl UAPI 查询/下发配置 │
@@ -21,14 +21,16 @@ shell 脚本 + Python Web UI 体系（此前的僵尸进程 / already exists 死
                                           └─────────────────────────────┘
 ```
 
-- **隧道实现**：daemon 为每个配置 fork 一个 `wireguard-go` 子进程，独立运行时目录
-  `/var/run/wgs/<name>/`（`WG_UAPI_DIR` + `WG_TUN_NAME_FILE` 环境变量，摆脱
-  `/var/run/wireguard` 共享目录残留文件问题）；配置下发/握手/流量查询用
-  wgctrl-go（macOS 走 userspace UAPI，已验证支持）；地址/MTU/路由用受控
-  `ifconfig`/`route` exec。子进程是 daemon 亲子，不再需要 AbandonProcessGroup。
+- **隧道实现**：daemon 为每个配置拉起一个 `wireguard-go` 进程，
+  每实例记账目录 `/var/run/wgtun/<name>/`（`WG_TUN_NAME_FILE` 写 tun 名 +
+  pid 文件）；配置下发/握手/流量查询走原生 UAPI 协议（wireguard-go 在
+  darwin 把 socket 硬编码在 `/var/run/wireguard/<tun>.sock`，按 tun 命名
+  天然不冲突）；地址/MTU/路由用受控 `ifconfig`/`route` exec。
+  注意：wireguard-go 在 darwin 会 fork 一次且启动器立即退出，权威 pid 取
+  UAPI socket 持有者（`lsof -t <tun>.sock`），不取 exec 返回值。
 - **daemon 崩溃自愈**：launchd KeepAlive 重启 daemon → 按实例 pid 文件 +
   UAPI 探活**收养**存活实例，僵死的清理重拉（把这次手工 runbook 变成代码）。
-- **开机自启**：单一 `com.wgs.daemon`（RunAtLoad），per-instance 的自启动只是
+- **开机自启**：单一 `com.wgtun.daemon`（RunAtLoad），per-instance 的自启动只是
   daemon 期望状态里的 enabled 标志——不再生成一堆 per-interface plist。
 - **配置目录**：沿用 `/usr/local/etc/wireguard/*.conf`（首次运行自动导入现有
   wg0/wg1，enabled 沿用当前运行状态）。
@@ -36,21 +38,21 @@ shell 脚本 + Python Web UI 体系（此前的僵尸进程 / already exists 死
 ## 仓库布局
 
 ```
-wg-service/
-├── main.go                  # wgs → TUI；wgs daemon；wgs daemon --install/--uninstall；wgs version
-├── go.mod                   # module github.com/dncore/wg-service
+wgtun/
+├── main.go                  # wgtun → TUI；wgtun daemon；wgtun daemon --install/--uninstall；wgtun version
+├── go.mod                   # module github.com/dncore/wgtun
 ├── internal/
 │   ├── wgconf/              # .conf 解析/序列化(wg-quick 兼容)、wgtypes 密钥生成、
 │   │   └── *_test.go        #   ListenPort 跨配置冲突 + lsof 在用检测、CIDR/密钥校验
 │   ├── daemon/              # 监督器、reconcile/收养、netsetup(ifconfig/route)、
 │   │                        #   launchd plist 安装
 │   ├── api/                 # HTTP-over-unix-socket 服务端 + TUI 用的客户端封装
-│   ├── state/               # /var/lib/wgs/state.json（enabled 等期望状态）
-│   ├── logs/                # 内存 ring(10k) + /var/log/wgs/events.jsonl 落盘 +
+│   ├── state/               # /var/lib/wgtun/state.json（enabled 等期望状态）
+│   ├── logs/                # 内存 ring(10k) + /var/log/wgtun/events.jsonl 落盘 +
 │   │                        #   尺寸轮转 + 查询/订阅
 │   ├── i18n/                # en/zh 字符串表（默认英文，运行时切换）
 │   └── tui/                 # app.go + 各 tab 模型 + 主题/按键/help
-├── Formula/wgs.rb           # brew formula（含 service 块）
+├── Formula/wgtun.rb           # brew formula（含 service 块）
 ├── .github/workflows/       # goreleaser → dncore/homebrew-tap 发布
 └── README.md                # 重写（双语）
 ```
@@ -86,7 +88,7 @@ GET    /logs?follow=1               # 流式订阅(chunked)
    编辑了运行中实例 → 提示重启生效。
 4. **Logs**：按实例/级别/时间范围/关键字过滤；回放(历史查询)与 follow 实时
    追随两种模式；级别着色。
-5. **Settings**：语言 English/中文(即时切换，持久化到 ~/.config/wgs/)、
+5. **Settings**：语言 English/中文(即时切换，持久化到 ~/.config/wgtun/)、
    daemon 状态与路径信息、重启 daemon。
 
 i18n：全部 UI 文案走 key → en/zh 映射；默认英文；daemon 侧系统日志固定英文。
@@ -94,10 +96,10 @@ i18n：全部 UI 文案走 key → en/zh 映射；默认英文；daemon 侧系�
 ## brew 发布
 
 - goreleaser 构建 darwin/arm64 + amd64，tag 触发 Actions 写入 `dncore/homebrew-tap`。
-- `brew install dncore/tap/wgs`；两种服务安装方式并存：
-  - `sudo brew services start wgs`（formula service 块，root LaunchDaemon）
-  - `sudo wgs daemon --install`（自装 plist，不依赖 brew services 行为）
-- 开发期可直接 `go build && sudo ./wgs daemon`（前台）联调。
+- `brew install dncore/tap/wgtun`；两种服务安装方式并存：
+  - `sudo brew services start wgtun`（formula service 块，root LaunchDaemon）
+  - `sudo wgtun daemon --install`（自装 plist，不依赖 brew services 行为）
+- 开发期可直接 `go build && sudo ./wgtun daemon`（前台）联调。
 
 ## 实施阶段（每步可验证）
 

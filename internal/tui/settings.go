@@ -8,10 +8,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/dncore/wg-service/internal/api"
-	"github.com/dncore/wg-service/internal/i18n"
-	"github.com/dncore/wg-service/internal/paths"
-	"github.com/dncore/wg-service/internal/wire"
+	"github.com/dncore/wgtun/internal/api"
+	"github.com/dncore/wgtun/internal/i18n"
+	"github.com/dncore/wgtun/internal/paths"
+	"github.com/dncore/wgtun/internal/wire"
 )
 
 // stateDoneMsg carries the fetched daemon info.

@@ -1,4 +1,4 @@
-# wgs — wireguard-go orchestrator
+# wgtun — wireguard-go orchestrator
 
 A WireGuard manager for macOS built as a **Go TUI + root daemon**. It manages
 any number of WireGuard instances by orchestrating `wireguard-go` processes,
@@ -11,8 +11,8 @@ plists again.
 - **Daemon** (launchd, root): supervises `wireguard-go` child processes,
   pushes configs over the native UAPI protocol, sets addresses/routes, adopts
   instances after a daemon crash, and auto-restarts with backoff.
-- **brew** distribution: `brew install dncore/tap/wgs`, services via launchd.
-- Structured event log (`/var/log/wgs/events.jsonl`) with rotation, instead of
+- **brew** distribution: `brew install dncore/tap/wgtun`, services via launchd.
+- Structured event log (`/var/log/wgtun/events.jsonl`) with rotation, instead of
   un-timestamped stderr dumps.
 
 > Replaces the v1 shell-script stack (`install.sh` + per-interface plists +
@@ -25,15 +25,15 @@ plists again.
 ## Install
 
 ```bash
-brew install dncore/tap/wgs   # requires wireguard-go (auto-depends)
-sudo wgs daemon --install     # install + start the launchd daemon
-wgs                           # open the TUI
+brew install dncore/tap/wgtun   # requires wireguard-go (auto-depends)
+sudo wgtun daemon --install     # install + start the launchd daemon
+wgtun                           # open the TUI
 ```
 
 Or run the daemon in the foreground for development:
 
 ```bash
-sudo ./wgs daemon
+sudo ./wgtun daemon
 ```
 
 Configs live in `/usr/local/etc/wireguard/*.conf` (wg-quick compatible).
@@ -54,15 +54,15 @@ The editor generates keys (`g`), and validates on save: CIDR → key → **Liste
 conflicts with other configs or with a port already bound on the host** (a
 pending conflict blocks the save with an inline error; `ctrl+f` force-saves).
 
-Language is per-user, persisted to `~/.config/wgs/settings.json`. Default:
+Language is per-user, persisted to `~/.config/wgtun/settings.json`. Default:
 English.
 
 ## How it works
 
 ```
 ┌─────────────┐  HTTP over unix socket   ┌───────────────────────────────┐
-│ wgs (TUI)   │◄────────────────────────►│ wgs daemon — com.wgs.daemon   │
-│ bubbletea   │  /var/run/wgs.sock       │   supervisor → wireguard-go ×N│
+│ wgtun (TUI)   │◄────────────────────────►│ wgtun daemon — com.wgtun.daemon   │
+│ bubbletea   │  /var/run/wgtun.sock       │   supervisor → wireguard-go ×N│
 │ your user   │  (root:admin 0660)       │   wgctrl UAPI set/get         │
 └─────────────┘                          │   reconcile · adopt · backoff │
                                          │   state (enabled) + event log │
@@ -70,7 +70,7 @@ English.
 ```
 
 - **Per-instance bookkeeping**: each `wireguard-go` writes its kernel-chosen
-  tun name into `/var/run/wgs/<name>/` (`WG_TUN_NAME_FILE`) plus a pid file,
+  tun name into `/var/run/wgtun/<name>/` (`WG_TUN_NAME_FILE`) plus a pid file,
   so the daemon can adopt, probe and clean up each instance individually.
   (wireguard-go itself hardcodes its UAPI socket directory to
   `/var/run/wireguard/<tun>.sock` on darwin; socket names are per-tun so
@@ -102,39 +102,39 @@ multiple `Address =` lines. Two deliberate deviations:
 ## Daemon ops
 
 ```bash
-sudo wgs daemon --install     # install + start com.wgs.daemon
-sudo wgs daemon --uninstall   # stop + remove
-sudo launchctl list | grep wgs
+sudo wgtun daemon --install     # install + start com.wgtun.daemon
+sudo wgtun daemon --uninstall   # stop + remove
+sudo launchctl list | grep wgtun
 sudo wg show all              # still works
 ```
 
 State (which instances are enabled / desired-running) persists in
-`/var/lib/wgs/state.json`. Runtime data lives in `/var/run/wgs/`, events in
-`/var/log/wgs/`.
+`/var/lib/wgtun/state.json`. Runtime data lives in `/var/run/wgtun/`, events in
+`/var/log/wgtun/`.
 
 ## Troubleshooting
 
 | Symptom | Check |
 |---------|-------|
-| TUI says daemon offline | `sudo wgs daemon --install`; socket at `/var/run/wgs.sock` |
-| Instance stuck with no handshake | `/var/log/wgs/events.jsonl` (or TUI Logs tab); check endpoint DNS |
+| TUI says daemon offline | `sudo wgtun daemon --install`; socket at `/var/run/wgtun.sock` |
+| Instance stuck with no handshake | `/var/log/wgtun/events.jsonl` (or TUI Logs tab); check endpoint DNS |
 | Something else broken | `go test ./...`, TUI Logs `f` follow |
 
 ## Development
 
 ```bash
-go build . && sudo env WGS_CONF_DIR=$PWD/conf ./wgs daemon   # sandboxed run
+go build -o wgtun ./cmd/wgtun && sudo env WGTUN_CONF_DIR=$PWD/conf ./wgtun daemon   # sandboxed run
 ```
 
-All locations can be overridden with `WGS_*` env vars (see
+All locations can be overridden with `WGTUN_*` env vars (see
 `internal/paths`), so the daemon runs fully unprivileged for tests:
-`WGS_CONF_DIR WGS_STATE_DIR WGS_RUN_DIR WGS_LOG_DIR WGS_SOCK WGS_WIREGUARD_GO`.
+`WGTUN_CONF_DIR WGTUN_STATE_DIR WGTUN_RUN_DIR WGTUN_LOG_DIR WGTUN_SOCK WGTUN_WIREGUARD_GO`.
 
 ## Migration from v1 (shell scripts)
 
 The old stack deployed `com.wireguard.{wg0,wg1,healthcheck,ui}` plists,
 `sleepwatcher`, and shells in `~/scripts/wireguard-cli/`. It can keep running
-alongside wgs IF it is stopped first (both would fight over the same utun
+alongside wgtun IF it is stopped first (both would fight over the same utun
 interfaces).
 
 ```bash
@@ -154,8 +154,8 @@ sudo rm -rf /var/run/wireguard
 ls /usr/local/etc/wireguard/
 
 # 5. start the new world
-sudo wgs daemon --install
-wgs
+sudo wgtun daemon --install
+wgtun
 ```
 
 ## License

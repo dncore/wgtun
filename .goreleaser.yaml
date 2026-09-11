@@ -1,7 +1,7 @@
 # .goreleaser.yaml
 version: 2
 
-project_name: wgs
+project_name: wgtun
 
 before:
   hooks:
@@ -10,7 +10,7 @@ before:
 builds:
   - env:
       - CGO_ENABLED=0
-    main: .
+    main: ./cmd/wgtun
     ldflags:
       - -s -w -X main.version={{ .Version }}
     goos:
@@ -18,15 +18,15 @@ builds:
     goarch:
       - amd64
       - arm64
-    binary: wgs
+    binary: wgtun
 
 archives:
   - formats: [zip]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 brews:
-  - name: wgs
-    homepage: "https://github.com/dncore/wg-service"
+  - name: wgtun
+    homepage: "https://github.com/dncore/wgtun"
     description: "WireGuard orchestrator: a Go TUI managing wireguard-go instances, with a root launchd daemon. Never shell out to wg again."
     license: MIT
     dependencies:
@@ -38,18 +38,18 @@ brews:
       name: goreleaser
       email: goreleaser@users.noreply.github.com
     service:
-      run: [opt_bin/"wgs", "daemon"]
+      run: [opt_bin/"wgtun", "daemon"]
       keep_alive: true
       working_dir: HOMEBREW_PREFIX
-      log_path: "/var/log/wgs/daemon.out.log"
-      error_log_path: "/var/log/wgs/daemon.err.log"
+      log_path: "/var/log/wgtun/daemon.out.log"
+      error_log_path: "/var/log/wgtun/daemon.err.log"
     caveats: |
       Start the daemon (requires root for the launchd LaunchDaemon):
 
-        sudo brew services start wgs
+        sudo brew services start wgtun
 
       Or install the plist directly:
 
-        sudo wgs daemon --install
+        sudo wgtun daemon --install
 
-      Then open the TUI with `wgs`.
+      Then open the TUI with `wgtun`.

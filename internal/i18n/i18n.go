@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/dncore/wg-service/internal/paths"
+	"github.com/dncore/wgtun/internal/paths"
 )
 
 // Lang is a supported UI language.
@@ -190,7 +190,7 @@ var tables = map[Lang]map[string]string{
 		LevelDebug: "DEBUG", LevelInfo: "INFO", LevelWarn: "WARN", LevelError: "ERROR",
 		SettingsTitle: "Settings", SettingsLang: "Language", SettingsLangDesc: "switch UI language",
 		LangEn: "English", LangZh: "中文",
-		SettingsDaemon: "Daemon", SettingsDaemonOff: "daemon offline — start it with: sudo wgs daemon --install",
+		SettingsDaemon: "Daemon", SettingsDaemonOff: "daemon offline — start it with: sudo wgtun daemon --install",
 		SettingsVersion: "Version", SettingsUptime: "Uptime", SettingsSocket: "Socket",
 		SettingsConfDir: "Config dir", SettingsRunDir: "Run dir", SettingsLogDir: "Log dir",
 		KeyQuit: "quit", KeySwitchLang: "switch language", KeyHelp: "help",
@@ -232,7 +232,7 @@ var tables = map[Lang]map[string]string{
 		LevelDebug: "调试", LevelInfo: "信息", LevelWarn: "警告", LevelError: "错误",
 		SettingsTitle: "设置", SettingsLang: "语言", SettingsLangDesc: "切换界面语言",
 		LangEn: "English", LangZh: "中文",
-		SettingsDaemon: "Daemon", SettingsDaemonOff: "daemon 离线 — 用 sudo wgs daemon --install 启动",
+		SettingsDaemon: "Daemon", SettingsDaemonOff: "daemon 离线 — 用 sudo wgtun daemon --install 启动",
 		SettingsVersion: "版本", SettingsUptime: "运行时长", SettingsSocket: "Socket",
 		SettingsConfDir: "配置目录", SettingsRunDir: "运行目录", SettingsLogDir: "日志目录",
 		KeyQuit: "退出", KeySwitchLang: "切换语言", KeyHelp: "帮助",
@@ -283,7 +283,7 @@ func LoadSettings() Settings {
 // Save persists the TUI settings file.
 func (s Settings) Save() error {
 	dir := paths.SettingsFile()
-	// mkdir the parent (~/.config/wgs)
+	// mkdir the parent (~/.config/wgtun)
 	parent := dir[:len(dir)-len("/settings.json")]
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return err

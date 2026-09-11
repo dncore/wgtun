@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dncore/wg-service/internal/wgconf"
+	"github.com/dncore/wgtun/internal/wgconf"
 )
 
 // netsetup applies addresses, MTU and routes to a utun interface, mirroring

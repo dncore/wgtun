@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/dncore/wg-service/internal/logs"
-	"github.com/dncore/wg-service/internal/wire"
+	"github.com/dncore/wgtun/internal/logs"
+	"github.com/dncore/wgtun/internal/wire"
 )
 
 // Client talks to the daemon over its unix socket.

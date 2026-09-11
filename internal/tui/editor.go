@@ -10,9 +10,9 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/dncore/wg-service/internal/api"
-	"github.com/dncore/wg-service/internal/i18n"
-	"github.com/dncore/wg-service/internal/wgconf"
+	"github.com/dncore/wgtun/internal/api"
+	"github.com/dncore/wgtun/internal/i18n"
+	"github.com/dncore/wgtun/internal/wgconf"
 )
 
 // peerDraft is the editable state of one peer.

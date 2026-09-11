@@ -11,16 +11,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dncore/wg-service/internal/api"
-	"github.com/dncore/wg-service/internal/logs"
-	"github.com/dncore/wg-service/internal/paths"
-	"github.com/dncore/wg-service/internal/state"
+	"github.com/dncore/wgtun/internal/api"
+	"github.com/dncore/wgtun/internal/logs"
+	"github.com/dncore/wgtun/internal/paths"
+	"github.com/dncore/wgtun/internal/state"
 )
 
 // Version is the binary version, set by main at startup.
 var Version = "dev"
 
-// Main is the entry point for `wgs daemon`.
+// Main is the entry point for `wgtun daemon`.
 func Main(args []string) {
 	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	install := fs.Bool("install", false, "install the LaunchDaemon and start it (sudo)")
@@ -31,19 +31,19 @@ func Main(args []string) {
 	switch {
 	case *install:
 		if err := InstallLaunchd(); err != nil {
-			fmt.Fprintln(os.Stderr, "wgs daemon --install:", err)
+			fmt.Fprintln(os.Stderr, "wgtun daemon --install:", err)
 			os.Exit(1)
 		}
 		return
 	case *uninstall:
 		if err := UninstallLaunchd(); err != nil {
-			fmt.Fprintln(os.Stderr, "wgs daemon --uninstall:", err)
+			fmt.Fprintln(os.Stderr, "wgtun daemon --uninstall:", err)
 			os.Exit(1)
 		}
 		return
 	}
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "wgs daemon:", err)
+		fmt.Fprintln(os.Stderr, "wgtun daemon:", err)
 		os.Exit(1)
 	}
 }
@@ -86,7 +86,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	ev.Info("", "wgs daemon started (socket %s, configs %s)", paths.SocketPath, paths.ConfDir)
+	ev.Info("", "wgtun daemon started (socket %s, configs %s)", paths.SocketPath, paths.ConfDir)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

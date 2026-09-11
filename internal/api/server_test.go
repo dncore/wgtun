@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dncore/wg-service/internal/logs"
-	"github.com/dncore/wg-service/internal/uapi"
-	"github.com/dncore/wg-service/internal/wire"
+	"github.com/dncore/wgtun/internal/logs"
+	"github.com/dncore/wgtun/internal/uapi"
+	"github.com/dncore/wgtun/internal/wire"
 	"path/filepath"
 )
 
@@ -83,7 +83,7 @@ func newTestServer(t *testing.T) (*Server, *fakeSup, *logs.Store, *Client) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	sock := filepath.Join(dir, "wgs.sock")
+	sock := filepath.Join(dir, "wgtun.sock")
 	srv, err := Serve(fs, ev, sock)
 	if err != nil {
 		t.Fatal(err)

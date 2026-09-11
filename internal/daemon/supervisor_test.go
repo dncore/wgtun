@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dncore/wg-service/internal/logs"
-	"github.com/dncore/wg-service/internal/paths"
-	"github.com/dncore/wg-service/internal/state"
-	"github.com/dncore/wg-service/internal/wgconf"
+	"github.com/dncore/wgtun/internal/logs"
+	"github.com/dncore/wgtun/internal/paths"
+	"github.com/dncore/wgtun/internal/state"
+	"github.com/dncore/wgtun/internal/wgconf"
 )
 
 // newTestSupervisor points the global paths at temp dirs and returns a
@@ -92,10 +92,10 @@ func TestRemovedConfigDropsInstance(t *testing.T) {
 
 func TestUAPIPathUsesWireGuardSockDir(t *testing.T) {
 	old := paths.WireGuardSockDir
-	paths.WireGuardSockDir = "/tmp/wgs-test-sockdir"
+	paths.WireGuardSockDir = "/tmp/wgtun-test-sockdir"
 	defer func() { paths.WireGuardSockDir = old }()
 	i := &inst{name: "wg0", tun: "utun9"}
-	if got, want := i.uapiPath(), "/tmp/wgs-test-sockdir/utun9.sock"; got != want {
+	if got, want := i.uapiPath(), "/tmp/wgtun-test-sockdir/utun9.sock"; got != want {
 		t.Fatalf("uapiPath = %q want %q", got, want)
 	}
 }

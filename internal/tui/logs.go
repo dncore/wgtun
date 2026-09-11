@@ -10,10 +10,10 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/dncore/wg-service/internal/api"
-	"github.com/dncore/wg-service/internal/i18n"
-	"github.com/dncore/wg-service/internal/logs"
-	"github.com/dncore/wg-service/internal/paths"
+	"github.com/dncore/wgtun/internal/api"
+	"github.com/dncore/wgtun/internal/i18n"
+	"github.com/dncore/wgtun/internal/logs"
+	"github.com/dncore/wgtun/internal/paths"
 )
 
 // logsModel is the Logs tab: history with filters plus live-follow mode.

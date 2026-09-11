@@ -14,10 +14,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/dncore/wg-service/internal/logs"
-	"github.com/dncore/wg-service/internal/paths"
-	"github.com/dncore/wg-service/internal/uapi"
-	"github.com/dncore/wg-service/internal/wire"
+	"github.com/dncore/wgtun/internal/logs"
+	"github.com/dncore/wgtun/internal/paths"
+	"github.com/dncore/wgtun/internal/uapi"
+	"github.com/dncore/wgtun/internal/wire"
 )
 
 // Supervisor is the daemon surface the API needs.

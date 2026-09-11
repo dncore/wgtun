@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dncore/wg-service/internal/wgconf"
+	"github.com/dncore/wgtun/internal/wgconf"
 )
 
 // PeerStatus is the live state of one peer, from get=1.

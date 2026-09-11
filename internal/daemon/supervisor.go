@@ -19,12 +19,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dncore/wg-service/internal/logs"
-	"github.com/dncore/wg-service/internal/paths"
-	"github.com/dncore/wg-service/internal/state"
-	"github.com/dncore/wg-service/internal/uapi"
-	"github.com/dncore/wg-service/internal/wgconf"
-	"github.com/dncore/wg-service/internal/wire"
+	"github.com/dncore/wgtun/internal/logs"
+	"github.com/dncore/wgtun/internal/paths"
+	"github.com/dncore/wgtun/internal/state"
+	"github.com/dncore/wgtun/internal/uapi"
+	"github.com/dncore/wgtun/internal/wgconf"
+	"github.com/dncore/wgtun/internal/wire"
 )
 
 // inst is the runtime view of one configured instance.

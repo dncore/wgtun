@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/dncore/wg-service/internal/paths"
+	"github.com/dncore/wgtun/internal/paths"
 )
 
-// launchdLabel is the system daemon label under which wgs runs.
-const launchdLabel = "com.wgs.daemon"
+// launchdLabel is the system daemon label under which wgtun runs.
+const launchdLabel = "com.wgtun.daemon"
 
 // InstallLaunchd writes the LaunchDaemon plist and load it.
 // Must run as root.

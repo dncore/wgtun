@@ -11,10 +11,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/dncore/wg-service/internal/api"
-	"github.com/dncore/wg-service/internal/i18n"
-	"github.com/dncore/wg-service/internal/paths"
-	"github.com/dncore/wg-service/internal/wire"
+	"github.com/dncore/wgtun/internal/api"
+	"github.com/dncore/wgtun/internal/i18n"
+	"github.com/dncore/wgtun/internal/paths"
+	"github.com/dncore/wgtun/internal/wire"
 )
 
 // send delivers a message into the bubbletea update loop from outside the
@@ -69,7 +69,7 @@ func Run() {
 	_, err := p.Run()
 	close(stop)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "wgs:", err)
+		fmt.Fprintln(os.Stderr, "wgtun:", err)
 		os.Exit(1)
 	}
 	tracef("run: exited")
@@ -163,14 +163,14 @@ func (a *app) poll() tea.Cmd {
 	})
 }
 
-// tracef appends a debug line to a file when WGS_TUI_TRACE is set. File
+// tracef appends a debug line to a file when WGTUN_TUI_TRACE is set. File
 // output avoids the stderr/AltScreen interleaving that makes terminal-based
 // tracing unreliable.
 func tracef(format string, args ...any) {
-	if os.Getenv("WGS_TUI_TRACE") == "" {
+	if os.Getenv("WGTUN_TUI_TRACE") == "" {
 		return
 	}
-	f, err := os.OpenFile("/tmp/wgs-tui.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile("/tmp/wgtun-tui.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
 	}

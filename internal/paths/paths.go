@@ -18,22 +18,22 @@ func env(key, def string) string {
 
 var (
 	// ConfDir holds the wg-quick compatible *.conf files (one instance per file).
-	ConfDir = env("WGS_CONF_DIR", "/usr/local/etc/wireguard")
+	ConfDir = env("WGTUN_CONF_DIR", "/usr/local/etc/wireguard")
 	// StateDir holds desired-state persistence.
-	StateDir = env("WGS_STATE_DIR", "/var/lib/wgs")
+	StateDir = env("WGTUN_STATE_DIR", "/var/lib/wgtun")
 	// RunDir holds per-instance runtime dirs (UAPI socket, tun name, pid).
-	RunDir = env("WGS_RUN_DIR", "/var/run/wgs")
+	RunDir = env("WGTUN_RUN_DIR", "/var/run/wgtun")
 	// LogDir holds daemon logs.
-	LogDir = env("WGS_LOG_DIR", "/var/log/wgs")
+	LogDir = env("WGTUN_LOG_DIR", "/var/log/wgtun")
 	// SocketPath is the Unix socket shared by daemon and TUI.
-	SocketPath = env("WGS_SOCK", "/var/run/wgs.sock")
+	SocketPath = env("WGTUN_SOCK", "/var/run/wgtun.sock")
 	// WireGuardGo is the wireguard-go binary the daemon orchestrates.
-	WireGuardGo = env("WGS_WIREGUARD_GO", "/opt/homebrew/bin/wireguard-go")
+	WireGuardGo = env("WGTUN_WIREGUARD_GO", "/opt/homebrew/bin/wireguard-go")
 	// WireGuardSockDir is where wireguard-go itself creates its UAPI
 	// sockets (<tun>.sock). Upstream hardcodes /var/run/wireguard on
 	// darwin (there is no WG_UAPI_DIR); the directory is only overridable
 	// here for tests.
-	WireGuardSockDir = env("WGS_WG_SOCK_DIR", "/var/run/wireguard")
+	WireGuardSockDir = env("WGTUN_WG_SOCK_DIR", "/var/run/wireguard")
 )
 
 // StateFile is the desired-state JSON path.
@@ -44,12 +44,12 @@ func EventsFile() string { return filepath.Join(LogDir, "events.jsonl") }
 
 // SettingsFile is the TUI-side settings path (per-user).
 func SettingsFile() string {
-	if v := os.Getenv("WGS_SETTINGS"); v != "" {
+	if v := os.Getenv("WGTUN_SETTINGS"); v != "" {
 		return v
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "wgs-settings.json"
+		return "wgtun-settings.json"
 	}
-	return filepath.Join(home, ".config", "wgs", "settings.json")
+	return filepath.Join(home, ".config", "wgtun", "settings.json")
 }

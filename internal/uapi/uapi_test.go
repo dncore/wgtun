@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dncore/wg-service/internal/wgconf"
+	"github.com/dncore/wgtun/internal/wgconf"
 )
 
 // fakeServer answers one request per connection and records what it received.
@@ -179,7 +179,7 @@ func TestGetErrno(t *testing.T) {
 }
 
 func TestDialMissing(t *testing.T) {
-	if _, err := Get(filepath.Join(os.TempDir(), "definitely-missing-wgs.sock")); err == nil {
+	if _, err := Get(filepath.Join(os.TempDir(), "definitely-missing-wgtun.sock")); err == nil {
 		t.Fatal("want dial error")
 	}
 }

@@ -5,7 +5,7 @@ package wire
 import (
 	"time"
 
-	"github.com/dncore/wg-service/internal/uapi"
+	"github.com/dncore/wgtun/internal/uapi"
 )
 
 // InstanceView is the API/TUI-facing snapshot of one instance.

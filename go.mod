@@ -1,4 +1,4 @@
-module github.com/dncore/wg-service
+module github.com/dncore/wgtun
 
 go 1.26
 

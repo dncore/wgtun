@@ -11,10 +11,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/dncore/wg-service/internal/api"
-	"github.com/dncore/wg-service/internal/i18n"
-	"github.com/dncore/wg-service/internal/uapi"
-	"github.com/dncore/wg-service/internal/wire"
+	"github.com/dncore/wgtun/internal/api"
+	"github.com/dncore/wgtun/internal/i18n"
+	"github.com/dncore/wgtun/internal/uapi"
+	"github.com/dncore/wgtun/internal/wire"
 )
 
 // dashSample keeps per-instance throughput history for sparklines.
