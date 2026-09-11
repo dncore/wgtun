@@ -41,12 +41,14 @@ brews:
     commit_author:
       name: goreleaser
       email: goreleaser@users.noreply.github.com
-    service:
-      run: [opt_bin/"wgtun", "daemon"]
-      keep_alive: true
-      working_dir: HOMEBREW_PREFIX
-      log_path: "/var/log/wgtun/daemon.out.log"
-      error_log_path: "/var/log/wgtun/daemon.err.log"
+    # brews.service is a STRING containing the Ruby DSL lines that go inside
+    # the formula's `service do ... end` block (not a structured map).
+    service: |
+      run [opt_bin/"wgtun", "daemon"]
+      keep_alive true
+      working_dir HOMEBREW_PREFIX
+      log_path "/var/log/wgtun/daemon.out.log"
+      error_log_path "/var/log/wgtun/daemon.err.log"
     caveats: |
       Start the daemon (requires root for the launchd LaunchDaemon):
 
