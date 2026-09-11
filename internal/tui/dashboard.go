@@ -18,11 +18,17 @@ import (
 )
 
 // dashSample keeps per-instance throughput history for sparklines.
+// Samples are throughput deltas (bytes/s) between consecutive polls, not the
+// cumulative byte counters — a cumulative curve only ever rises and jumps to
+// zero when the tunnel restarts, which tells you nothing about activity.
 // plot caches the rendered sparkline so View() never re-runs asciigraph.
 type dashSample struct {
-	rx   []float64
-	tx   []float64
-	plot string
+	rx      []float64
+	curRate float64 // most recent rx rate, for the caption
+	lastRx  uint64  // cumulative rx at the previous sample
+	lastAt  time.Time
+	lastSet bool
+	plot    string
 }
 
 type dashboardModel struct {
@@ -55,19 +61,36 @@ func (m *dashboardModel) updateStatus(name string, resp *wire.StatusResp) {
 		hist = &dashSample{}
 		m.history[name] = hist
 	}
-	if resp.Status != nil {
-		var rx uint64
-		for _, p := range resp.Status.Peers {
-			rx += p.RxBytes
-		}
-		hist.rx = append(hist.rx, float64(rx))
-		if len(hist.rx) > 30 {
-			hist.rx = hist.rx[1:]
-		}
-		if len(hist.rx) > 2 {
-			hist.plot = asciigraph.Plot(hist.rx, asciigraph.Height(4), asciigraph.Width(34), asciigraph.Caption("rx"))
+	if resp.Status == nil {
+		return
+	}
+	var rx uint64
+	for _, p := range resp.Status.Peers {
+		rx += p.RxBytes
+	}
+	now := time.Now()
+	if hist.lastSet {
+		dt := now.Sub(hist.lastAt).Seconds()
+		if dt >= 0.5 {
+			rate := 0.0
+			if rx >= hist.lastRx { // a decrease means the tunnel restarted
+				rate = float64(rx-hist.lastRx) / dt
+			}
+			hist.rx = append(hist.rx, rate)
+			if len(hist.rx) > 30 {
+				hist.rx = hist.rx[1:]
+			}
+			hist.curRate = rate
+			if len(hist.rx) > 2 {
+				hist.plot = asciigraph.Plot(hist.rx,
+					asciigraph.Height(4), asciigraph.Width(34),
+					asciigraph.Caption("rx "+humanRate(rate)+"/s"))
+			}
 		}
 	}
+	hist.lastRx = rx
+	hist.lastAt = now
+	hist.lastSet = true
 }
 
 func (m *dashboardModel) Update(msg tea.Msg) (any, tea.Cmd) {
@@ -291,6 +314,18 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n-1]) + "…"
+}
+
+// humanRate formats a bytes-per-second value.
+func humanRate(bps float64) string {
+	switch {
+	case bps < 1024:
+		return fmt.Sprintf("%.0fB", bps)
+	case bps < 1024*1024:
+		return fmt.Sprintf("%.1fKB", bps/1024)
+	default:
+		return fmt.Sprintf("%.1fMB", bps/(1024*1024))
+	}
 }
 
 func humanBytes(n uint64) string {
