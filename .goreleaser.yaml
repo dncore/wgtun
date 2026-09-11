@@ -1,0 +1,55 @@
+# .goreleaser.yaml
+version: 2
+
+project_name: wgs
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    main: .
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    binary: wgs
+
+archives:
+  - formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+brews:
+  - name: wgs
+    homepage: "https://github.com/dncore/wg-service"
+    description: "WireGuard orchestrator: a Go TUI managing wireguard-go instances, with a root launchd daemon. Never shell out to wg again."
+    license: MIT
+    dependencies:
+      - wireguard-go
+    repository:
+      owner: dncore
+      name: homebrew-tap
+    commit_author:
+      name: goreleaser
+      email: goreleaser@users.noreply.github.com
+    service:
+      run: [opt_bin/"wgs", "daemon"]
+      keep_alive: true
+      working_dir: HOMEBREW_PREFIX
+      log_path: "/var/log/wgs/daemon.out.log"
+      error_log_path: "/var/log/wgs/daemon.err.log"
+    caveats: |
+      Start the daemon (requires root for the launchd LaunchDaemon):
+
+        sudo brew services start wgs
+
+      Or install the plist directly:
+
+        sudo wgs daemon --install
+
+      Then open the TUI with `wgs`.

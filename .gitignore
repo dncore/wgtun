@@ -1,8 +1,6 @@
 .env
-client/dist/
-client/node_modules/
-node_modules/
-*.pyc
-__pycache__/
-.DS_Store
 com.wireguard.*.plist
+/dist/
+wgs
+*.test
+.DS_Store
