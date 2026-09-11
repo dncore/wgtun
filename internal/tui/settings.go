@@ -33,7 +33,7 @@ func newSettings(lang i18n.Lang) *settingsModel {
 }
 
 func (m *settingsModel) fetchState() tea.Cmd {
-	return func() tea.Msg {
+	return async(func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		st, err := m.client.State(ctx)
@@ -41,7 +41,7 @@ func (m *settingsModel) fetchState() tea.Cmd {
 			return stateFailedMsg{err: err}
 		}
 		return stateDoneMsg{st: st}
-	}
+	})
 }
 
 func (m *settingsModel) Update(msg tea.Msg) (any, tea.Cmd) {

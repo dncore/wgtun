@@ -28,6 +28,7 @@ type logsModel struct {
 	followCh  chan logs.Event
 	followCtx context.CancelFunc
 
+	loaded    bool // history fetched at least once
 	instances map[string]bool // known instance names for the filter
 	instance  string          // "" = all
 	minLevel  logs.Level
@@ -56,7 +57,7 @@ type logsDataMsg struct {
 }
 
 func (m *logsModel) fetch() tea.Cmd {
-	return func() tea.Msg {
+	return async(func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		events, err := m.client.LogsQuery(ctx, logs.Filter{
@@ -66,7 +67,7 @@ func (m *logsModel) fetch() tea.Cmd {
 			Limit:    300,
 		})
 		return logsDataMsg{events: events, err: err}
-	}
+	})
 }
 
 // startFollow opens the follow stream: a goroutine pumps events into a
@@ -75,7 +76,7 @@ func (m *logsModel) startFollow() tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.followCtx = cancel
 	m.follow = true
-	m.events = nil
+	// keep already-loaded history; new events append after it
 	m.followCh = make(chan logs.Event, 128)
 	client := m.client
 	f := logs.Filter{Instance: m.instance, MinLevel: m.minLevel, Text: m.text}
@@ -93,15 +94,16 @@ func (m *logsModel) startFollow() tea.Cmd {
 	return m.takeFollow()
 }
 
-// takeFollow blocks for the next event on the follow channel.
+// takeFollow waits for the next event on the follow channel. It must run
+// through async: a raw blocking Cmd would freeze the update loop.
 func (m *logsModel) takeFollow() tea.Cmd {
-	return func() tea.Msg {
+	return async(func() tea.Msg {
 		ev, ok := <-m.followCh
 		if !ok {
 			return logsFollowMsg{err: fmt.Errorf("stream ended")}
 		}
 		return logsFollowMsg{ev: ev}
-	}
+	})
 }
 
 func (m *logsModel) stopFollow() {
@@ -124,6 +126,7 @@ func (m *logsModel) Update(msg tea.Msg) (any, tea.Cmd) {
 			return m, nil
 		}
 		m.events = msg.events
+		m.loaded = true
 		m.renderViewport()
 		return m, nil
 	case logsFollowMsg:

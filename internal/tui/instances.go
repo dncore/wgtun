@@ -39,11 +39,26 @@ func newInstances() *instancesModel {
 }
 
 func (m *instancesModel) setViews(v []wire.InstanceView) {
+	if viewsEqual(m.views, v) {
+		return // no change: do not rebuild the table or trigger a redraw
+	}
 	m.views = v
 	if m.confirmName != "" || m.editing {
 		return
 	}
 	m.rebuildTable()
+}
+
+func viewsEqual(a, b []wire.InstanceView) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *instancesModel) rebuildTable() {
@@ -91,7 +106,8 @@ func (m *instancesModel) rebuildTable() {
 	s.Header = s.Header.BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(colDim).BorderBottom(true).Bold(false).
 		Foreground(colMuted)
-	s.Selected = s.Selected.Foreground(colPrimary).Background(colTableSel).Bold(true)
+	// terminal reverse video instead of an injected background color
+	s.Selected = s.Selected.Reverse(true).Bold(true)
 	t.SetStyles(s)
 	if m.ready && len(m.table.Rows()) > 0 {
 		cur := m.table.Cursor()
@@ -117,7 +133,7 @@ func (m *instancesModel) fetchDetail() tea.Cmd {
 	if v == nil {
 		return nil
 	}
-	return func() tea.Msg {
+	return async(func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		resp, err := m.client.Status(ctx, v.Name)
@@ -128,7 +144,7 @@ func (m *instancesModel) fetchDetail() tea.Cmd {
 			return detailDoneMsg{text: resp.Error}
 		}
 		return detailDoneMsg{text: m.renderDetail(resp)}
-	}
+	})
 }
 
 type detailDoneMsg struct{ text string }
@@ -238,7 +254,7 @@ func (m *instancesModel) refreshCmd() tea.Cmd {
 }
 
 func (m *instancesModel) actionCmd(act string, v *wire.InstanceView) tea.Cmd {
-	return func() tea.Msg {
+	return async(func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		var err error
@@ -260,11 +276,11 @@ func (m *instancesModel) actionCmd(act string, v *wire.InstanceView) tea.Cmd {
 		default:
 			return statusMsg{key: i18n.ActionFailed, args: []any{err}}
 		}
-	}
+	})
 }
 
 func (m *instancesModel) toggleBootCmd(v *wire.InstanceView) tea.Cmd {
-	return func() tea.Msg {
+	return async(func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := m.client.SetEnabled(ctx, v.Name, !v.Enabled); err != nil {
@@ -274,18 +290,18 @@ func (m *instancesModel) toggleBootCmd(v *wire.InstanceView) tea.Cmd {
 			return statusMsg{key: i18n.BootEnabled}
 		}
 		return statusMsg{key: i18n.BootDisabled}
-	}
+	})
 }
 
 func (m *instancesModel) deleteCmd(v *wire.InstanceView) tea.Cmd {
-	return func() tea.Msg {
+	return async(func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := m.client.Delete(ctx, v.Name, false); err != nil {
 			return statusMsg{key: i18n.ActionFailed, args: []any{err}}
 		}
 		return statusMsg{key: i18n.Deleted}
-	}
+	})
 }
 
 func (m *instancesModel) updateConfirm(msg tea.KeyMsg) (any, tea.Cmd) {

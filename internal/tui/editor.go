@@ -79,7 +79,7 @@ func (e *editorModel) load() tea.Cmd {
 	if e.isNew {
 		return nil
 	}
-	return func() tea.Msg {
+	return async(func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		content, err := e.client.Conf(ctx, e.name)
@@ -87,7 +87,7 @@ func (e *editorModel) load() tea.Cmd {
 			return editorLoadMsg{err: err}
 		}
 		return editorLoadMsg{content: content}
-	}
+	})
 }
 
 type editorLoadMsg struct {
@@ -195,7 +195,7 @@ func (e *editorModel) save(force bool) tea.Cmd {
 	}
 	content := e.serialize()
 	e.busy = true
-	return func() tea.Msg {
+	return async(func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		var err error
@@ -208,7 +208,7 @@ func (e *editorModel) save(force bool) tea.Cmd {
 			return editorSaveMsg{err: err}
 		}
 		return editorSaveMsg{ok: true}
-	}
+	})
 }
 
 type editorSaveMsg struct {

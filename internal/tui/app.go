@@ -17,14 +17,62 @@ import (
 	"github.com/dncore/wg-service/internal/wire"
 )
 
+// send delivers a message into the bubbletea update loop from outside the
+// Cmd machinery. Set once in Run.
+var send func(tea.Msg)
+
+// noopMsg is the immediate placeholder Cmd result from async().
+type noopMsg struct{}
+
+// async runs work on its own goroutine and delivers the result via send,
+// returning from the Cmd immediately.
+//
+// This exists because bubbletea v1.3.7 executes batch commands *synchronously
+// in the update loop*: `go p.Send(cmd())` evaluates cmd() in the calling
+// goroutine (Go evaluates call arguments before spawning). Any slow Cmd —
+// a tea.Tick, an HTTP call, a blocking channel read — therefore freezes the
+// whole UI until it returns. Wrapping slow work here keeps the loop free.
+func async(work func() tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		go func() {
+			if m := work(); m != nil {
+				send(m)
+			}
+		}()
+		return noopMsg{}
+	}
+}
+
 // Run starts the TUI. It exits when the user quits.
 func Run() {
+	tracef("run: entering newApp")
 	app := newApp()
+	tracef("run: newApp done")
 	p := tea.NewProgram(app, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	send = p.Send
+	// Drive the periodic refresh from a plain goroutine: tea.Tick as a Cmd
+	// would block the update loop (see async above).
+	stop := make(chan struct{})
+	go func() {
+		t := time.NewTicker(pollInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case ts := <-t.C:
+				p.Send(tickMsg(ts))
+			}
+		}
+	}()
+	tracef("run: program created, calling Run")
+	_, err := p.Run()
+	close(stop)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "wgs:", err)
 		os.Exit(1)
 	}
+	tracef("run: exited")
 }
 
 type tabID int
@@ -88,26 +136,46 @@ func newApp() *app {
 	}
 }
 
+// pollInterval is the background refresh cadence. Kept slow on purpose:
+// every tick triggers several follow-up messages and full redraws, and the
+// data (handshakes, byte counters) does not change meaningfully faster.
+const pollInterval = 4 * time.Second
+
 func (a *app) Init() tea.Cmd {
-	return tea.Batch(
-		tea.Tick(2*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) }),
-		a.poll(),
-	)
+	tracef("init: called")
+	return a.poll()
 }
 
 // poll fetches instances + state and refreshes the current tab.
 func (a *app) poll() tea.Cmd {
-	return func() tea.Msg {
+	return async(func() tea.Msg {
+		tracef("poll start")
 		ctx, cancel := context.WithTimeout(a.ctx, 3*time.Second)
 		defer cancel()
 		views, err := a.client.Instances(ctx)
+		tracef("poll done err=%v views=%d", err, len(views))
 		if err != nil {
 			a.offline = true
 			return pollDoneMsg{err: err}
 		}
 		a.offline = false
 		return pollDoneMsg{views: views}
+	})
+}
+
+// tracef appends a debug line to a file when WGS_TUI_TRACE is set. File
+// output avoids the stderr/AltScreen interleaving that makes terminal-based
+// tracing unreliable.
+func tracef(format string, args ...any) {
+	if os.Getenv("WGS_TUI_TRACE") == "" {
+		return
 	}
+	f, err := os.OpenFile("/tmp/wgs-tui.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(f, "%s "+format+"\n", append([]any{time.Now().Format("15:04:05.000")}, args...)...)
+	f.Close()
 }
 
 type pollDoneMsg struct {
@@ -129,9 +197,18 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.Type == tea.KeyShiftTab {
 				dir = -1
 			}
-			a.tab = tabID((int(a.tab) + dir + 4) % 4)
-			a.inst.table.Focus()
-			return a, a.poll()
+			return a, a.switchTab(dir)
+		case tea.KeyLeft, tea.KeyRight:
+			// the editor uses left/right for text navigation; everywhere
+			// else they switch tabs
+			if a.tab == tabInstances && a.inst.editing {
+				return a.forward(tea.KeyMsg(m))
+			}
+			dir := 1
+			if m.Type == tea.KeyLeft {
+				dir = -1
+			}
+			return a, a.switchTab(dir)
 		case tea.KeyCtrlQ, tea.KeyCtrlC:
 			a.cancel()
 			return a, tea.Quit
@@ -140,7 +217,10 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.forward(tea.KeyMsg(m))
 
 	case tickMsg:
-		return a, tea.Batch(tea.Tick(2*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) }), a.poll())
+		return a, a.poll()
+
+	case noopMsg:
+		return a, nil
 
 	case pollDoneMsg:
 		if m.err != nil {
@@ -151,7 +231,10 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.dash.setOffline(false)
 		a.dash.setViews(m.views)
 		a.inst.setViews(m.views)
-		// fetch per-instance live status for the dashboard
+		// live per-instance status is only needed by the dashboard
+		if a.tab != tabDashboard {
+			return a, nil
+		}
 		var cmds []tea.Cmd
 		for _, v := range m.views {
 			if v.Running {
@@ -237,9 +320,30 @@ func (a *app) View() string {
 		tabs,
 		body,
 		"",
-		statusBar.Width(a.width).Render(" "+status+" "+footer),
+		statusBar.Render(status+"   "+footer),
 	)
-	return base.Width(a.width).Render(content)
+	return base.Render(content)
+}
+
+// switchTab moves to the adjacent tab (dir +1/-1) and restores focus on the
+// instances table when returning to that tab. It draws immediately from
+// whatever data is already in memory; data loading happens asynchronously
+// via the returned command, never blocking the redraw.
+func (a *app) switchTab(dir int) tea.Cmd {
+	a.tab = tabID((int(a.tab) + dir + 4) % 4)
+	switch a.tab {
+	case tabInstances:
+		a.inst.table.Focus()
+	case tabLogs:
+		if !a.logs.loaded {
+			return a.logs.fetch()
+		}
+	case tabSettings:
+		if a.settings.st == nil && !a.settings.offline {
+			return a.settings.fetchState()
+		}
+	}
+	return nil
 }
 
 func (a *app) renderTabs() string {

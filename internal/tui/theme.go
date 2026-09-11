@@ -13,23 +13,20 @@ var (
 	colYellow    = lipgloss.Color("#d29922")
 	colRed       = lipgloss.Color("#f85149")
 	colMuted     = lipgloss.Color("#8b949e")
-	colWhite     = lipgloss.Color("#e6edf3")
-	colDim       = lipgloss.Color("#484f58")
-	colBg        = lipgloss.Color("#0d1117")
-	colTableSel  = lipgloss.Color("#161b22")
+	colWhite = lipgloss.Color("#e6edf3")
+	colDim   = lipgloss.Color("#484f58")
 )
 
-// Base style: black background box.
-var base = lipgloss.NewStyle().
-	Background(colBg).
-	Foreground(colWhite).
-	Padding(0, 1)
+// Base style: inherits the terminal's own colors (no background fill —
+// painting the full screen background produces huge ANSI output and makes
+// redraws noticeably slow).
+var base = lipgloss.NewStyle().Padding(0, 1)
 
 var (
 	titleStyle = lipgloss.NewStyle().Foreground(colPrimary).Bold(true).MarginBottom(1)
 	subtle     = lipgloss.NewStyle().Foreground(colMuted)
-	statusBar  = lipgloss.NewStyle().Foreground(colWhite).Background(colDim).Padding(0, 1)
-	tabActive  = lipgloss.NewStyle().Foreground(colBg).Background(colPrimary).Bold(true).Padding(0, 1)
+	statusBar  = lipgloss.NewStyle().Foreground(colWhite).Padding(0, 1)
+	tabActive  = lipgloss.NewStyle().Foreground(colPrimary).Bold(true).Underline(true).Padding(0, 1)
 	tabInactive = lipgloss.NewStyle().Foreground(colMuted).Padding(0, 1)
 	footerKey  = lipgloss.NewStyle().Foreground(colPrimary)
 	footerDesc = lipgloss.NewStyle().Foreground(colMuted)

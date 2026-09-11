@@ -15,9 +15,11 @@ import (
 )
 
 // dashSample keeps per-instance throughput history for sparklines.
+// plot caches the rendered sparkline so View() never re-runs asciigraph.
 type dashSample struct {
-	rx []float64
-	tx []float64
+	rx   []float64
+	tx   []float64
+	plot string
 }
 
 type dashboardModel struct {
@@ -59,6 +61,9 @@ func (m *dashboardModel) updateStatus(name string, resp *wire.StatusResp) {
 		if len(hist.rx) > 30 {
 			hist.rx = hist.rx[1:]
 		}
+		if len(hist.rx) > 2 {
+			hist.plot = asciigraph.Plot(hist.rx, asciigraph.Height(4), asciigraph.Width(34), asciigraph.Caption("rx"))
+		}
 	}
 }
 
@@ -73,7 +78,7 @@ func (m *dashboardModel) Update(msg tea.Msg) (any, tea.Cmd) {
 
 // fetchStatusCmd returns a cmd to fetch one instance's live status.
 func (m *dashboardModel) fetchStatusCmd(client *api.Client, name string) tea.Cmd {
-	return func() tea.Msg {
+	return async(func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		resp, err := client.Status(ctx, name)
@@ -81,7 +86,7 @@ func (m *dashboardModel) fetchStatusCmd(client *api.Client, name string) tea.Cmd
 			return statusDoneMsg{name: name, resp: &wire.StatusResp{Error: err.Error()}}
 		}
 		return statusDoneMsg{name: name, resp: resp}
-	}
+	})
 }
 
 func (m *dashboardModel) View(lang i18n.Lang, width int) string {
@@ -193,9 +198,8 @@ func (m *dashboardModel) renderCard(lang i18n.Lang, v wire.InstanceView) string 
 		rows = append(rows, subtle.Render(i18n.T(lang, i18n.CardTun)+": "+v.Tun))
 	}
 
-	if hist, ok := m.history[v.Name]; ok && len(hist.rx) > 2 {
-		graph := asciigraph.Plot(hist.rx, asciigraph.Height(4), asciigraph.Width(34), asciigraph.Caption("rx"))
-		rows = append(rows, graph)
+	if hist, ok := m.history[v.Name]; ok && hist.plot != "" {
+		rows = append(rows, hist.plot)
 	}
 	return cardStyle.Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
 }
