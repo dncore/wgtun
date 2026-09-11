@@ -71,7 +71,10 @@ func Serve(sup Supervisor, ev Logger, sockPath string) (*Server, error) {
 		writeJSON(w, wire.StateInfo{
 			Version: version, Started: started, Socket: sockPath,
 			ConfDir: paths.ConfDir, RunDir: paths.RunDir, LogDir: paths.LogDir,
-			UpSec: int64(time.Since(started).Seconds()),
+			UpSec:              int64(time.Since(started).Seconds()),
+			WireGuardGoPath:    wgGoPath,
+			WireGuardGoVersion: wgGoVersion,
+			WireGuardGoOK:      wgGoOK,
 		})
 	})
 	mux.HandleFunc("GET /instances", func(w http.ResponseWriter, r *http.Request) {
@@ -174,6 +177,18 @@ var version = "dev"
 
 // SetVersion records the binary version for /state.
 func SetVersion(v string) { version = v }
+
+// wireguard-go detection result, set from the daemon at startup.
+var (
+	wgGoPath    string
+	wgGoVersion string
+	wgGoOK      bool
+)
+
+// SetWireGuardGoInfo records the detected userspace implementation for /state.
+func SetWireGuardGoInfo(path string, ok bool, version string) {
+	wgGoPath, wgGoOK, wgGoVersion = path, ok, version
+}
 
 // Close shuts the server and the listener down.
 func (s *Server) Close() {

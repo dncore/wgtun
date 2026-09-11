@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
 
@@ -42,6 +43,10 @@ type editorModel struct {
 	peerEdit bool
 	peerDraftFields []textinput.Model
 	peerFieldIdx    int
+
+	// paste-import mode: paste a whole WireGuard config into a textarea
+	pasteMode bool
+	pasteArea textarea.Model
 
 	err  string
 	busy bool
@@ -236,6 +241,27 @@ func (e *editorModel) Update(msg tea.Msg) (any, tea.Cmd) {
 		return e, statusCmd(i18n.EditorSaved)
 	}
 
+	// paste-import mode owns all input (including bracketed paste messages)
+	if e.pasteMode {
+		km, ok := msg.(tea.KeyMsg)
+		if !ok {
+			var cmd tea.Cmd
+			e.pasteArea, cmd = e.pasteArea.Update(msg)
+			return e, cmd
+		}
+		switch km.String() {
+		case "ctrl+s", "ctrl+o":
+			e.applyPasted(e.pasteArea.Value())
+			return e, nil
+		case "esc":
+			e.pasteMode = false
+			return e, nil
+		}
+		var cmd tea.Cmd
+		e.pasteArea, cmd = e.pasteArea.Update(km)
+		return e, cmd
+	}
+
 	km, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return e, nil
@@ -246,6 +272,12 @@ func (e *editorModel) Update(msg tea.Msg) (any, tea.Cmd) {
 		return e, e.save(false)
 	case "ctrl+f":
 		return e, e.save(true)
+	case "ctrl+v":
+		// open the paste area (only from the plain interface form)
+		if !e.peerEdit && !e.peerMode {
+			e.startPaste()
+		}
+		return e, nil
 	case "esc":
 		switch {
 		case e.peerEdit:
@@ -290,6 +322,37 @@ func (e *editorModel) updateIface(km tea.KeyMsg) (any, tea.Cmd) {
 	nf, cmd := e.fields[e.focus].Update(km)
 	e.fields[e.focus] = nf
 	return e, cmd
+}
+
+// startPaste opens the paste-import textarea.
+func (e *editorModel) startPaste() {
+	ta := textarea.New()
+	ta.Placeholder = "[Interface]\nPrivateKey = ...\n\n[Peer]\nPublicKey = ...\nAllowedIPs = ..."
+	ta.SetWidth(64)
+	ta.SetHeight(10)
+	ta.Focus()
+	e.pasteArea = ta
+	e.pasteMode = true
+	e.err = ""
+}
+
+// applyPasted validates the pasted config and, on success, fills the form.
+func (e *editorModel) applyPasted(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	conf, err := wgconf.Parse(strings.NewReader(text))
+	if err == nil {
+		err = conf.Validate()
+	}
+	if err != nil {
+		e.err = err.Error()
+		return
+	}
+	e.err = ""
+	e.applyConf(text)
+	e.pasteMode = false
 }
 
 func (e *editorModel) setFocus(n int) {
@@ -384,6 +447,9 @@ func (e *editorModel) View(lang i18n.Lang, width int) string {
 	b = append(b, titleStyle.Render(title))
 
 	switch {
+	case e.pasteMode:
+		b = append(b, subtle.Render(i18n.T(lang, i18n.PasteHint)))
+		b = append(b, "", e.pasteArea.View())
 	case e.peerEdit:
 		labels := []string{
 			i18n.T(lang, i18n.FieldPeerPublic),
@@ -444,6 +510,7 @@ func (e *editorModel) View(lang i18n.Lang, width int) string {
 	b = append(b, "", subtle.Render(
 		i18n.T(lang, i18n.KeySave)+" ctrl+s   "+
 			i18n.T(lang, i18n.KeyForce)+" ctrl+f   "+
+			i18n.T(lang, i18n.KeyPaste)+"   "+
 			i18n.T(lang, i18n.KeyCancel)+" esc"))
 	return lipgloss.JoinVertical(lipgloss.Left, b...)
 }

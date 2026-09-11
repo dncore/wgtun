@@ -32,6 +32,11 @@ type StateInfo struct {
 	RunDir   string    `json:"runDir"`
 	LogDir   string    `json:"logDir"`
 	UpSec    int64     `json:"uptimeSec"`
+	// WireGuardGo reports the resolved userspace implementation the daemon
+	// orchestrates (detected once at daemon start).
+	WireGuardGoPath    string `json:"wireguardGoPath"`
+	WireGuardGoVersion string `json:"wireguardGoVersion,omitempty"`
+	WireGuardGoOK      bool   `json:"wireguardGoOK"`
 }
 
 // StatusResp is the live status of one running instance.

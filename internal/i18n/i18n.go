@@ -49,6 +49,7 @@ const (
 	HandshakeNow    = "time.handshakeNow"
 	HandshakeAgo    = "time.handshakeAgo" // args: duration
 	NoInstances     = "dashboard.noInstances"
+	WgGoMissing     = "settings.wireguardGoMissing"
 	DaemonOffline   = "daemon.offline"
 	DaemonReconnecting = "daemon.reconnecting"
 
@@ -121,6 +122,8 @@ const (
 	LogsNoEvents    = "logs.noEvents"
 	KeyFollow       = "key.follow"
 	KeyClearFilter  = "key.clearFilter"
+	KeyPaste        = "key.paste"
+	PasteHint       = "editor.pasteHint"
 	FilterCleared   = "logs.filterCleared"
 	LevelDebug      = "level.debug"
 	LevelInfo       = "level.info"
@@ -136,6 +139,7 @@ const (
 	SettingsDaemon    = "settings.daemon"
 	SettingsDaemonOff = "settings.daemonOffline"
 	SettingsVersion   = "settings.version"
+	SettingsWgGo      = "settings.wireguardGo"
 	SettingsUptime    = "settings.uptime"
 	SettingsSocket    = "settings.socket"
 	SettingsConfDir   = "settings.confDir"
@@ -162,7 +166,8 @@ var tables = map[Lang]map[string]string{
 		CardPeers: "peers", CardEndpoint: "endpoint", CardTun: "tun",
 		CardListen: "listen", CardPubKey: "pub", CardAllowed: "allowed", CardNone: "—",
 		Never: "never", HandshakeNow: "just now", HandshakeAgo: "%s ago",
-		NoInstances: "No instances configured yet — press n in the Instances tab to create one.",
+		NoInstances: "No instances yet — press n in the Instances tab to create one.\nIn the editor, ctrl+v pastes an existing WireGuard config; alternatively drop\nany .conf file into the WireGuard config directory and it is imported automatically.",
+		WgGoMissing: "wireguard-go not found — install it with: brew install wireguard-go",
 		DaemonOffline: "daemon offline", DaemonReconnecting: "reconnecting…",
 		InstTitle: "Instances", InstName: "NAME", InstAutostart: "BOOT", InstState: "STATE", InstPort: "PORT",
 		InstPeers: "PEERS", InstOnline: "ONLINE", InstUptime: "UPTIME",
@@ -186,12 +191,14 @@ var tables = map[Lang]map[string]string{
 		LogsTitle: "Logs", LogsAll: "all", LogsFollow: "follow", LogsPause: "paused",
 		LogsFilter: "filter", LogsNoEvents: "no events match",
 		KeyFollow: "follow/pause", KeyClearFilter: "clear filter",
+		KeyPaste:      "ctrl+v paste config",
+		PasteHint:     "Paste a full WireGuard config ([Interface] + [Peer] sections), then ctrl+s applies it to the form. esc cancels.",
 		FilterCleared: "filters cleared, reloaded",
 		LevelDebug: "DEBUG", LevelInfo: "INFO", LevelWarn: "WARN", LevelError: "ERROR",
 		SettingsTitle: "Settings", SettingsLang: "Language", SettingsLangDesc: "switch UI language",
 		LangEn: "English", LangZh: "中文",
 		SettingsDaemon: "Daemon", SettingsDaemonOff: "daemon offline — start it with: sudo wgtun daemon --install",
-		SettingsVersion: "Version", SettingsUptime: "Uptime", SettingsSocket: "Socket",
+		SettingsVersion: "Version", SettingsWgGo: "wireguard-go", SettingsUptime: "Uptime", SettingsSocket: "Socket",
 		SettingsConfDir: "Config dir", SettingsRunDir: "Run dir", SettingsLogDir: "Log dir",
 		KeyQuit: "quit", KeySwitchLang: "switch language", KeyHelp: "help",
 		StatusBusy: "working…", StatusDone: "done",
@@ -204,7 +211,8 @@ var tables = map[Lang]map[string]string{
 		CardPeers: "peer", CardEndpoint: "端点", CardTun: "接口",
 		CardListen: "监听", CardPubKey: "公钥", CardAllowed: "允许", CardNone: "—",
 		Never: "从未", HandshakeNow: "刚刚", HandshakeAgo: "%s 前",
-		NoInstances: "还没有实例 — 在「实例」页按 n 创建",
+		NoInstances: "还没有实例 —— 在「实例」页按 n 新建。\n编辑器里 ctrl+v 可粘贴现有的 WireGuard 配置；\n或把任意 .conf 文件放进 WireGuard 配置目录，会自动导入。",
+		WgGoMissing: "未找到 wireguard-go —— 请安装: brew install wireguard-go",
 		DaemonOffline: "daemon 离线", DaemonReconnecting: "重连中…",
 		InstTitle: "实例", InstName: "名称", InstAutostart: "自启", InstState: "状态", InstPort: "端口",
 		InstPeers: "peer", InstOnline: "在线", InstUptime: "运行时长",
@@ -228,12 +236,14 @@ var tables = map[Lang]map[string]string{
 		LogsTitle: "日志", LogsAll: "全部", LogsFollow: "跟随", LogsPause: "已暂停",
 		LogsFilter: "过滤", LogsNoEvents: "没有匹配的事件",
 		KeyFollow: "跟随/暂停", KeyClearFilter: "清除过滤",
+		KeyPaste:      "ctrl+v 粘贴配置",
+		PasteHint:     "粘贴完整 WireGuard 配置（[Interface] + [Peer] 段），ctrl+s 应用到表单，esc 取消。",
 		FilterCleared: "过滤器已清除，已重新加载",
 		LevelDebug: "调试", LevelInfo: "信息", LevelWarn: "警告", LevelError: "错误",
 		SettingsTitle: "设置", SettingsLang: "语言", SettingsLangDesc: "切换界面语言",
 		LangEn: "English", LangZh: "中文",
 		SettingsDaemon: "Daemon", SettingsDaemonOff: "daemon 离线 — 用 sudo wgtun daemon --install 启动",
-		SettingsVersion: "版本", SettingsUptime: "运行时长", SettingsSocket: "Socket",
+		SettingsVersion: "版本", SettingsWgGo: "wireguard-go", SettingsUptime: "运行时长", SettingsSocket: "Socket",
 		SettingsConfDir: "配置目录", SettingsRunDir: "运行目录", SettingsLogDir: "日志目录",
 		KeyQuit: "退出", KeySwitchLang: "切换语言", KeyHelp: "帮助",
 		StatusBusy: "处理中…", StatusDone: "完成",

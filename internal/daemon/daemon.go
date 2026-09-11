@@ -82,6 +82,8 @@ func run() error {
 	sup.BootInit(freshBoot)
 
 	api.SetVersion(Version)
+	wgPath, wgOK, wgVer := detectWireGuardGo(ev)
+	api.SetWireGuardGoInfo(wgPath, wgOK, wgVer)
 	srv, err := api.Serve(sup, ev, paths.SocketPath)
 	if err != nil {
 		return err

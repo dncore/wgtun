@@ -143,7 +143,21 @@ const pollInterval = 4 * time.Second
 
 func (a *app) Init() tea.Cmd {
 	tracef("init: called")
-	return a.poll()
+	return tea.Batch(a.poll(), a.fetchState())
+}
+
+// fetchState pulls daemon info once at startup (wireguard-go detection,
+// paths) for the dashboard's first-run guidance and the settings tab.
+func (a *app) fetchState() tea.Cmd {
+	return async(func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		st, err := a.client.State(ctx)
+		if err != nil {
+			return stateFailedMsg{err: err}
+		}
+		return stateDoneMsg{st: st}
+	})
 }
 
 // poll fetches instances + state and refreshes the current tab.
@@ -221,6 +235,11 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case noopMsg:
 		return a, nil
+
+	case stateDoneMsg:
+		// daemon info: used by the dashboard's empty state and settings
+		a.dash.setWgInfo(m.st)
+		return a.forward(m)
 
 	case pollDoneMsg:
 		if m.err != nil {

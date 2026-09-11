@@ -19,6 +19,9 @@ func main() {
 		case "version":
 			fmt.Println("wgtun", version)
 			return
+		case "import":
+			runImport(os.Args[2:])
+			return
 		case "help", "-h", "--help":
 			usage()
 			return
@@ -41,6 +44,7 @@ Usage:
   wgtun daemon          run the root daemon (foreground; launchd runs this)
   wgtun daemon --install    install the LaunchDaemon plist (sudo)
   wgtun daemon --uninstall  remove the LaunchDaemon plist (sudo)
+  wgtun import <file.conf>  import a WireGuard config as an instance
   wgtun version         print version
 `)
 }

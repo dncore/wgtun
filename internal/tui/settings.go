@@ -92,8 +92,18 @@ func (m *settingsModel) View(lang i18n.Lang, width int) string {
 	rows = append(rows, "", titleStyle.Render(i18n.T(lang, i18n.SettingsDaemon)))
 	if m.st != nil {
 		up := fmt.Sprintf("%dh%dm", int(m.st.UpSec/3600), int(m.st.UpSec%3600/60))
+		wgGo := m.st.WireGuardGoPath
+		if m.st.WireGuardGoVersion != "" {
+			wgGo += "  " + m.st.WireGuardGoVersion
+		}
+		if !m.st.WireGuardGoOK {
+			wgGo = lipgloss.NewStyle().Foreground(colRed).Render(i18n.T(lang, i18n.WgGoMissing))
+		} else {
+			wgGo = subtle.Render(wgGo)
+		}
 		rows = append(rows,
 			"  "+i18n.T(lang, i18n.SettingsVersion)+": "+m.st.Version,
+			"  "+i18n.T(lang, i18n.SettingsWgGo)+": "+wgGo,
 			"  "+i18n.T(lang, i18n.SettingsUptime)+": "+up,
 			"  "+i18n.T(lang, i18n.SettingsSocket)+":  "+subtle.Render(m.st.Socket),
 			"  "+i18n.T(lang, i18n.SettingsConfDir)+":  "+subtle.Render(m.st.ConfDir),

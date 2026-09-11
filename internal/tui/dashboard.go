@@ -34,7 +34,10 @@ type dashboardModel struct {
 	statuses map[string]*wire.StatusResp // name → last status fetch
 	history  map[string]*dashSample
 	offline  bool
+	wgInfo   *wire.StateInfo // daemon state, for first-run guidance
 }
+
+func (m *dashboardModel) setWgInfo(st *wire.StateInfo) { m.wgInfo = st }
 
 func newDashboard() *dashboardModel {
 	return &dashboardModel{
@@ -118,6 +121,12 @@ func (m *dashboardModel) View(lang i18n.Lang, width int) string {
 	}
 	if len(m.views) == 0 {
 		b = append(b, subtle.Render(i18n.T(lang, i18n.NoInstances)))
+		if m.wgInfo != nil && !m.wgInfo.WireGuardGoOK {
+			b = append(b, "",
+				lipgloss.NewStyle().Foreground(colRed).Render("⚠ "+i18n.T(lang, i18n.WgGoMissing)),
+				subtle.Render("   looked at: "+m.wgInfo.WireGuardGoPath),
+			)
+		}
 		return lipgloss.JoinVertical(lipgloss.Left, b...)
 	}
 
