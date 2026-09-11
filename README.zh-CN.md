@@ -112,6 +112,23 @@ wgtun                           # 打开 TUI
 配置位于 `/usr/local/etc/wireguard/*.conf`（wg-quick 兼容格式）。
 首次启动自动导入已有文件，无需迁移。
 
+## 导入现有配置
+
+三种方式，按你手头有什么选：
+
+```bash
+wgtun import ~/Downloads/vpn.conf        # CLI：校验 → 开启自启 → 立即启动
+wgtun import vpn.conf --name office      # 自定义实例名
+```
+
+- **TUI 内**：在「实例」页按 `n` 打开编辑器，按 `ctrl+v` 粘贴整份
+  `[Interface]`/`[Peer]` 配置，`ctrl+s` 填充表单，调整后保存。
+- **放文件**：把任意 `.conf` 放进 `/usr/local/etc/wireguard/`，daemon
+  自动发现并导入、开启自启、立即启动。
+
+daemon 启动时会检测 `wireguard-go`（路径与版本显示在设置页）。
+缺失时启动日志与 TUI 会明确提示该装什么，而不是等第一条隧道启动失败。
+
 ## 架构
 
 ```

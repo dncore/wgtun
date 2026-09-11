@@ -114,6 +114,25 @@ wgtun                           # open the TUI
 Configs live in `/usr/local/etc/wireguard/*.conf` (wg-quick compatible).
 Existing files are imported on first start; nothing to migrate.
 
+## Importing an existing config
+
+Three ways, depending on what you have:
+
+```bash
+wgtun import ~/Downloads/vpn.conf        # CLI: validates, enables autostart, starts it
+wgtun import vpn.conf --name office      # override the instance name
+```
+
+- **In the TUI**: open the editor (`n` in the Instances tab) and press
+  `ctrl+v` — paste the whole `[Interface]`/`[Peer]` config, `ctrl+s`
+  fills the form, adjust and save.
+- **Drop a file**: put any `.conf` into `/usr/local/etc/wireguard/` — the
+  daemon picks it up automatically, enables autostart and starts it.
+
+The daemon detects `wireguard-go` at startup (path and version are shown
+in Settings). If it is missing, start-up logs and the TUI tell you what
+to install instead of failing silently at first tunnel start.
+
 ## Architecture
 
 ```
