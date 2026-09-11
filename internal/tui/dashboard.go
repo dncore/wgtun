@@ -3,13 +3,13 @@ package tui
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/guptarohit/asciigraph"
 
 	"github.com/dncore/wg-service/internal/api"
 	"github.com/dncore/wg-service/internal/i18n"
@@ -21,14 +21,12 @@ import (
 // Samples are throughput deltas (bytes/s) between consecutive polls, not the
 // cumulative byte counters — a cumulative curve only ever rises and jumps to
 // zero when the tunnel restarts, which tells you nothing about activity.
-// plot caches the rendered sparkline so View() never re-runs asciigraph.
 type dashSample struct {
 	rx      []float64
 	curRate float64 // most recent rx rate, for the caption
 	lastRx  uint64  // cumulative rx at the previous sample
 	lastAt  time.Time
 	lastSet bool
-	plot    string
 }
 
 type dashboardModel struct {
@@ -81,11 +79,6 @@ func (m *dashboardModel) updateStatus(name string, resp *wire.StatusResp) {
 				hist.rx = hist.rx[1:]
 			}
 			hist.curRate = rate
-			if len(hist.rx) > 2 {
-				hist.plot = asciigraph.Plot(hist.rx,
-					asciigraph.Height(4), asciigraph.Width(34),
-					asciigraph.Caption("rx "+humanRate(rate)+"/s"))
-			}
 		}
 	}
 	hist.lastRx = rx
@@ -249,15 +242,62 @@ func (m *dashboardModel) renderCard(lang i18n.Lang, v wire.InstanceView) string 
 		}
 	}
 
-	// sparkline area, fixed height (asciigraph Height(4) + caption = 5 rows)
-	if hist, ok := m.history[v.Name]; ok && hist.plot != "" {
-		rows = append(rows, strings.Split(hist.plot, "\n")...)
+	// sparkline area, fixed 5 rows (4 chart + 1 caption)
+	if hist, ok := m.history[v.Name]; ok && len(hist.rx) > 2 {
+		rows = append(rows, sparkRows(hist.rx, cardWidth, 4)...)
+		rows = append(rows, subtle.Render(fmt.Sprintf("rx %s/s", humanRate(hist.curRate))))
 	} else {
 		for i := 0; i < 5; i++ {
 			rows = append(rows, "")
 		}
 	}
 	return cardStyle.Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
+}
+
+// sparkRows renders a column sparkline of the newest values, right-aligned
+// into a width×height grid. Each column is quantized to eighths via block
+// characters. Hand-rolled instead of asciigraph because that library draws
+// long horizontal ledges between sparse samples and shifts its axis labels
+// as the auto-scale changes.
+func sparkRows(vals []float64, width, height int) []string {
+	grid := make([][]rune, height)
+	for r := range grid {
+		grid[r] = []rune(strings.Repeat(" ", width))
+	}
+	if len(vals) > width {
+		vals = vals[len(vals)-width:]
+	}
+	offset := width - len(vals)
+
+	maxV := 0.0
+	for _, v := range vals {
+		if v > maxV {
+			maxV = v
+		}
+	}
+	if maxV <= 0 {
+		maxV = 1
+	}
+
+	blocks := []rune("▁▂▃▄▅▆▇█")
+	for col, v := range vals {
+		// level in eighths of a cell, over the full height
+		level := int(math.Round(v / maxV * float64(height*8)))
+		for r := 0; r < height; r++ {
+			full := (height - r) * 8 // eighths needed to fill this cell
+			switch {
+			case level >= full:
+				grid[r][offset+col] = '█'
+			case level > full-8:
+				grid[r][offset+col] = blocks[level-(full-8)-1]
+			}
+		}
+	}
+	out := make([]string, height)
+	for r := range grid {
+		out[r] = string(grid[r])
+	}
+	return out
 }
 
 // peerRows renders exactly peerLines rows for one peer.
