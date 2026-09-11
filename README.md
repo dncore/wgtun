@@ -130,6 +130,38 @@ All locations can be overridden with `WGTUN_*` env vars (see
 `internal/paths`), so the daemon runs fully unprivileged for tests:
 `WGTUN_CONF_DIR WGTUN_STATE_DIR WGTUN_RUN_DIR WGTUN_LOG_DIR WGTUN_SOCK WGTUN_WIREGUARD_GO`.
 
+## Releasing
+
+Pushing a `v*` tag triggers `.github/workflows/release.yml`: tests run,
+binaries build for darwin/amd64 + arm64, a GitHub release is created, and
+`Formula/wgtun.rb` is pushed to `dncore/homebrew-tap`.
+
+**One-time setup:**
+
+1. Create the tap repository:
+
+   ```bash
+   gh repo create dncore/homebrew-tap --public --description "Homebrew tap for dncore projects" --add-readme
+   ```
+
+2. Create a token that can write to it. The default `GITHUB_TOKEN` cannot
+   push to a *different* repository, so use a fine-grained PAT with
+   **Contents: Read and write**, repository access limited to
+   `dncore/homebrew-tap` (nothing else), then store it here:
+
+   ```bash
+   gh secret set HOMEBREW_TAP_TOKEN --repo dncore/wgtun
+   ```
+
+**Each release:**
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Users upgrade with `brew update && brew upgrade wgtun`.
+
 ## Migration from v1 (shell scripts)
 
 The old stack deployed `com.wireguard.{wg0,wg1,healthcheck,ui}` plists,

@@ -3,6 +3,8 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # manual re-run for an existing tag (pick the tag ref in the UI)
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -14,13 +16,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: goreleaser/goreleaser-action@v6
+
+      - name: Test
+        run: go test ./...
+
+      - name: Release
+        uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: "~> v2.8"
           args: release --clean
         env:
+          # GitHub release in this repo
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # write access to dncore/homebrew-tap (fine-grained PAT with
+          # Contents: Read and write on that repository only)
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

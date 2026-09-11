@@ -34,6 +34,10 @@ brews:
     repository:
       owner: dncore
       name: homebrew-tap
+      # Cross-repo push: the default GITHUB_TOKEN cannot write to
+      # dncore/homebrew-tap, so a PAT stored as HOMEBREW_TAP_TOKEN is
+      # required (see README, Releasing section).
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     commit_author:
       name: goreleaser
       email: goreleaser@users.noreply.github.com
