@@ -49,6 +49,14 @@ func (s *Store) Get(name string) Instance {
 	return s.m[name]
 }
 
+// Has reports whether an instance has a persisted record.
+func (s *Store) Has(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.m[name]
+	return ok
+}
+
 // Set stores the state of one instance and persists atomically.
 func (s *Store) Set(name string, in Instance) error {
 	s.mu.Lock()

@@ -72,15 +72,20 @@ func New(st *state.Store, ev *logs.Store) *Supervisor {
 // LoadConfigs scans the config dir and (re)loads every *.conf.
 // Unparseable files are logged and skipped, never fatal.
 func (s *Supervisor) LoadConfigs() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadConfigsLocked()
+}
+
+// loadConfigsLocked is LoadConfigs without locking; callers hold s.mu.
+func (s *Supervisor) loadConfigsLocked() error {
 	if err := os.MkdirAll(paths.ConfDir, 0o755); err != nil {
 		return err
 	}
 	entries, err := os.ReadDir(paths.ConfDir)
 	if err != nil {
-		return err
+		return err // never clean up instances on a transient read failure
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	seen := map[string]bool{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".conf") {
@@ -100,13 +105,24 @@ func (s *Supervisor) LoadConfigs() error {
 		cur, ok := s.insts[name]
 		if !ok {
 			s.insts[name] = &inst{name: name, confPath: path, conf: conf}
+			// First time this config is seen: treat it as something the user
+			// wants managed — enable boot autostart and desired-running so a
+			// migration from any previous setup hands over seamlessly.
+			if !s.st.Has(name) {
+				s.st.Set(name, state.Instance{Enabled: true, DesiredRun: true})
+				s.ev.Info(name, "first import: enabled + desired-running")
+			}
 			continue
 		}
 		cur.confPath, cur.conf = path, conf
 	}
-	for name := range s.insts {
+	for name, i := range s.insts {
 		if !seen[name] {
+			if i.running() {
+				s.stopLocked(i, "config removed")
+			}
 			delete(s.insts, name)
+			s.ev.Info(name, "config removed, instance dropped")
 		}
 	}
 	return nil
@@ -152,6 +168,10 @@ func (s *Supervisor) BootInit(freshBoot bool) {
 func (s *Supervisor) Reconcile() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// pick up config files added/removed on disk behind our back
+	if err := s.loadConfigsLocked(); err != nil {
+		s.ev.Warn("", "config rescan failed: %v", err)
+	}
 	names := make([]string, 0, len(s.insts))
 	for n := range s.insts {
 		names = append(names, n)
@@ -175,6 +195,14 @@ func (s *Supervisor) Reconcile() {
 // or unresponsive UAPI) triggers a full cleanup + restart with backoff.
 func (s *Supervisor) probeLocked(i *inst) {
 	alive := pidAlive(i.pid)
+	if !alive {
+		// stale recorded pid (e.g. after daemon adoption) — re-check the
+		// socket holder before declaring the instance dead
+		if p := socketPid(i.uapiPath()); p > 0 {
+			i.pid = p
+			alive = true
+		}
+	}
 	var st *uapi.DeviceStatus
 	var err error
 	if alive {
@@ -319,9 +347,11 @@ func (s *Supervisor) startLocked(i *inst) error {
 			s.ev.Warn(i.name, "PostUp failed: %v", err)
 		}
 	}
+	if err := os.MkdirAll(paths.WireGuardSockDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir wireguard socket dir: %v", err)
+	}
 	cmd := exec.Command(paths.WireGuardGo, "utun")
 	cmd.Env = append(os.Environ(),
-		"WG_UAPI_DIR="+dir,
 		"WG_TUN_NAME_FILE="+filepath.Join(dir, "tun.name"),
 	)
 	stderr, err := cmd.StderrPipe()
@@ -332,18 +362,14 @@ func (s *Supervisor) startLocked(i *inst) error {
 		i.lastErr = err.Error()
 		return fmt.Errorf("start wireguard-go: %v", err)
 	}
-	i.pid = cmd.Process.Pid
 	i.adopted = false
 	i.startedAt = started
-	if err := os.WriteFile(filepath.Join(dir, "pid"), []byte(strconv.Itoa(i.pid)), 0o644); err != nil {
-		s.ev.Warn(i.name, "write pid file: %v", err)
-	}
+	// wireguard-go forks on darwin: the launcher process exits immediately
+	// and the real device process is reparented to launchd. Reap the
+	// launcher silently; the authoritative pid comes from the UAPI socket
+	// below.
+	go func() { cmd.Wait() }()
 	go s.pumpWireguardLogs(i.name, stderr)
-	go func() {
-		if err := cmd.Wait(); err != nil {
-			s.ev.Info(i.name, "wireguard-go exited: %v", err)
-		}
-	}()
 
 	// wait for the tun name and UAPI socket
 	tun, err := waitTunName(dir, 5*time.Second)
@@ -357,6 +383,17 @@ func (s *Supervisor) startLocked(i *inst) error {
 		s.cleanupLocked(i)
 		i.lastErr = err.Error()
 		return fmt.Errorf("uapi socket: %v", err)
+	}
+	// the pid that matters is the one holding the UAPI socket
+	pid, err := waitSocketPid(i.uapiPath(), 3*time.Second)
+	if err != nil {
+		s.cleanupLocked(i)
+		i.lastErr = err.Error()
+		return err
+	}
+	i.pid = pid
+	if err := os.WriteFile(filepath.Join(dir, "pid"), []byte(strconv.Itoa(i.pid)), 0o644); err != nil {
+		s.ev.Warn(i.name, "write pid file: %v", err)
 	}
 	if err := s.pushConfLocked(i); err != nil {
 		s.cleanupLocked(i)
@@ -412,8 +449,15 @@ func (s *Supervisor) stopLocked(i *inst, reason string) {
 	s.ev.Info(i.name, "stopped (%s)", reason)
 }
 
-// cleanupLocked kills the process (if alive) and removes the runtime dir.
+// cleanupLocked kills the process (if alive) and removes the runtime dir
+// and the device's UAPI socket.
 func (s *Supervisor) cleanupLocked(i *inst) {
+	// trust the socket holder over the recorded pid when possible
+	if i.tun != "" {
+		if p := socketPid(i.uapiPath()); p > 0 {
+			i.pid = p
+		}
+	}
 	if i.pid != 0 && pidAlive(i.pid) {
 		syscall.Kill(i.pid, syscall.SIGTERM)
 		deadline := time.Now().Add(3 * time.Second)
@@ -423,6 +467,9 @@ func (s *Supervisor) cleanupLocked(i *inst) {
 		if pidAlive(i.pid) {
 			syscall.Kill(i.pid, syscall.SIGKILL)
 		}
+	}
+	if i.tun != "" {
+		os.Remove(i.uapiPath())
 	}
 	os.RemoveAll(i.runtimeDir())
 	i.pid, i.tun, i.status = 0, "", nil
@@ -464,22 +511,26 @@ func (s *Supervisor) Adopt() {
 			continue
 		}
 		dir := i.runtimeDir()
-		data, err := os.ReadFile(filepath.Join(dir, "pid"))
-		if err != nil {
-			continue
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		if err != nil || !pidAlive(pid) {
-			os.RemoveAll(dir)
-			continue
-		}
 		tun, err := os.ReadFile(filepath.Join(dir, "tun.name"))
 		if err != nil {
 			os.RemoveAll(dir)
 			continue
 		}
-		i.pid = pid
 		i.tun = strings.TrimSpace(string(tun))
+		pid := 0
+		if data, err := os.ReadFile(filepath.Join(dir, "pid")); err == nil {
+			pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+		}
+		if pid <= 0 || !pidAlive(pid) {
+			// the recorded pid may be the exited launcher; trust the socket
+			pid = socketPid(i.uapiPath())
+		}
+		if pid <= 0 {
+			os.RemoveAll(dir)
+			i.tun = ""
+			continue
+		}
+		i.pid = pid
 		if _, err := uapi.Get(i.uapiPath()); err != nil {
 			// process alive but backend wedged — clean and let reconcile restart
 			s.ev.Warn(name, "adopted pid %d but UAPI dead, cleaning", pid)
@@ -578,6 +629,9 @@ func (s *Supervisor) CreateInstance(name, content string, force bool) error {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return err
 	}
+	// A freshly created instance starts at once but does not get boot
+	// autostart implicitly.
+	s.st.Set(name, state.Instance{Enabled: false, DesiredRun: true})
 	s.ev.Info(name, "instance created")
 	return s.LoadConfigs()
 }
@@ -660,13 +714,51 @@ func (s *Supervisor) checkConflicts(name string, conf *wgconf.Config, force bool
 // ---- helpers ----
 
 func (i *inst) runtimeDir() string { return filepath.Join(paths.RunDir, i.name) }
-func (i *inst) uapiPath() string   { return filepath.Join(i.runtimeDir(), i.tun+".sock") }
+
+// uapiPath is where wireguard-go itself creates the control socket:
+// its socket directory (hardcoded /var/run/wireguard upstream) plus the
+// kernel-assigned tun name. The per-instance runtime dir only holds our
+// pid/tun.name bookkeeping.
+func (i *inst) uapiPath() string {
+	return filepath.Join(paths.WireGuardSockDir, i.tun+".sock")
+}
 
 func pidAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
 	return syscall.Kill(pid, 0) == nil
+}
+
+// socketPid returns the pid holding the given UAPI socket, 0 if none.
+// wireguard-go forks on darwin, so the pid returned by exec is not the
+// device process — the socket holder is the authoritative one.
+func socketPid(sockPath string) int {
+	if sockPath == "" {
+		return 0
+	}
+	out, err := exec.Command("/usr/sbin/lsof", "-t", sockPath).Output()
+	if err != nil {
+		return 0
+	}
+	for _, f := range strings.Fields(string(out)) {
+		if pid, err := strconv.Atoi(f); err == nil {
+			return pid
+		}
+	}
+	return 0
+}
+
+// waitSocketPid polls until the socket has an owner.
+func waitSocketPid(sockPath string, timeout time.Duration) (int, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if pid := socketPid(sockPath); pid > 0 {
+			return pid, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return 0, fmt.Errorf("no process owns %s", sockPath)
 }
 
 func waitTunName(dir string, timeout time.Duration) (string, error) {

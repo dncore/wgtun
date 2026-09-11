@@ -29,6 +29,11 @@ var (
 	SocketPath = env("WGS_SOCK", "/var/run/wgs.sock")
 	// WireGuardGo is the wireguard-go binary the daemon orchestrates.
 	WireGuardGo = env("WGS_WIREGUARD_GO", "/opt/homebrew/bin/wireguard-go")
+	// WireGuardSockDir is where wireguard-go itself creates its UAPI
+	// sockets (<tun>.sock). Upstream hardcodes /var/run/wireguard on
+	// darwin (there is no WG_UAPI_DIR); the directory is only overridable
+	// here for tests.
+	WireGuardSockDir = env("WGS_WG_SOCK_DIR", "/var/run/wireguard")
 )
 
 // StateFile is the desired-state JSON path.

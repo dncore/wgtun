@@ -69,9 +69,15 @@ English.
                                          └───────────────────────────────┘
 ```
 
-- **Per-instance runtime isolation**: each `wireguard-go` gets its own
-  directory `/var/run/wgs/<name>/` (`WG_UAPI_DIR` + `WG_TUN_NAME_FILE`), so
-  there is no shared `/var/run/wireguard` namespace to collide or rot in.
+- **Per-instance bookkeeping**: each `wireguard-go` writes its kernel-chosen
+  tun name into `/var/run/wgs/<name>/` (`WG_TUN_NAME_FILE`) plus a pid file,
+  so the daemon can adopt, probe and clean up each instance individually.
+  (wireguard-go itself hardcodes its UAPI socket directory to
+  `/var/run/wireguard/<tun>.sock` on darwin; socket names are per-tun so
+  they never collide.) Note: on darwin wireguard-go forks once and the
+  launcher exits, so the daemon treats the **holder of the UAPI socket**
+  (`lsof -t <tun>.sock`) as the authoritative instance pid, not the pid
+  returned by `exec`.
 - **Autostart**: enabled instances come up on boot (daemon's `RunAtLoad`);
   a clean-shutdown marker distinguishes a reboot (apply autostart) from a
   plain daemon restart (respect what you stopped).
