@@ -37,18 +37,29 @@ type instancesModel struct {
 }
 
 func newInstances() *instancesModel {
-	return &instancesModel{client: api.Connect(paths.SocketPath)}
+	m := &instancesModel{client: api.Connect(paths.SocketPath)}
+	m.table = newTable()
+	return m
 }
 
+// setViews pushes fresh data into the table. The table model is built once and
+// reused: bubbles renders a 2×height window around the cursor and keeps the
+// scroll offset inside that window, so replacing the table — which the poll
+// did whenever the rows changed, and the uptime column changes every second —
+// recomputed the window from offset 0 and dropped the selected row out of view.
 func (m *instancesModel) setViews(v []wire.InstanceView) {
 	if viewsEqual(m.views, v) {
-		return // no change: do not rebuild the table or trigger a redraw
+		return // no change: leave the table (and its scroll position) alone
 	}
 	m.views = v
-	if m.confirmName != "" || m.editing {
-		return
+	m.ready = true
+	rows := m.rows()
+	m.table.SetRows(rows)
+	// keep the cursor inside the new row range: instances disappear from under
+	// it, and an empty table parks it at -1
+	if c := m.table.Cursor(); c < 0 || c >= len(rows) {
+		m.table.SetCursor(max(0, len(rows)-1))
 	}
-	m.rebuildTable()
 }
 
 func viewsEqual(a, b []wire.InstanceView) bool {
@@ -63,7 +74,9 @@ func viewsEqual(a, b []wire.InstanceView) bool {
 	return true
 }
 
-func (m *instancesModel) rebuildTable() {
+// newTable builds the instances table; columns, styles and height are fixed
+// for the lifetime of the model.
+func newTable() table.Model {
 	cols := []table.Column{
 		{Title: "NAME", Width: 16},
 		{Title: "BOOT", Width: 5},
@@ -74,6 +87,23 @@ func (m *instancesModel) rebuildTable() {
 		{Title: "UPTIME", Width: 10},
 		{Title: "CONFLICT", Width: 14},
 	}
+	t := table.New(
+		table.WithColumns(cols),
+		table.WithFocused(true),
+		table.WithHeight(12),
+	)
+	s := table.DefaultStyles()
+	s.Header = s.Header.BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(colDim).BorderBottom(true).Bold(false).
+		Foreground(colMuted)
+	// terminal reverse video instead of an injected background color
+	s.Selected = s.Selected.Reverse(true).Bold(true)
+	t.SetStyles(s)
+	return t
+}
+
+// rows renders the current views as table rows.
+func (m *instancesModel) rows() []table.Row {
 	rows := make([]table.Row, 0, len(m.views))
 	for _, v := range m.views {
 		state := "stopped"
@@ -98,32 +128,11 @@ func (m *instancesModel) rebuildTable() {
 			uptime, conflict,
 		})
 	}
-	t := table.New(
-		table.WithColumns(cols),
-		table.WithRows(rows),
-		table.WithFocused(true),
-		table.WithHeight(12),
-	)
-	s := table.DefaultStyles()
-	s.Header = s.Header.BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(colDim).BorderBottom(true).Bold(false).
-		Foreground(colMuted)
-	// terminal reverse video instead of an injected background color
-	s.Selected = s.Selected.Reverse(true).Bold(true)
-	t.SetStyles(s)
-	if m.ready && len(m.table.Rows()) > 0 {
-		cur := m.table.Cursor()
-		if cur >= len(t.Rows()) {
-			cur = len(t.Rows()) - 1
-		}
-		t.SetCursor(cur)
-	}
-	m.table = t
-	m.ready = true
+	return rows
 }
 
 func (m *instancesModel) selected() *wire.InstanceView {
-	if len(m.views) == 0 || m.table.Cursor() >= len(m.views) {
+	if c := m.table.Cursor(); len(m.views) == 0 || c < 0 || c >= len(m.views) {
 		return nil
 	}
 	return &m.views[m.table.Cursor()]
@@ -256,6 +265,18 @@ func (m *instancesModel) Update(msg tea.Msg) (any, tea.Cmd) {
 			return m, m.fetchDetail()
 		case "c":
 			return m, nil
+		case "up", "k", "down", "j", "pgup", "pgdown":
+			// cursor movement belongs to the table. Only these keys are
+			// forwarded: bubbles' default keymap also binds u/d (half page)
+			// and b (page up), which are start/stop/boot here.
+			cur := m.table.Cursor()
+			var cmd tea.Cmd
+			m.table, cmd = m.table.Update(msg)
+			if m.table.Cursor() != cur {
+				// the pane below shows one instance's live status
+				m.detail, m.detailResp = "", nil
+			}
+			return m, cmd
 		}
 	case detailDoneMsg:
 		if msg.resp != nil {
