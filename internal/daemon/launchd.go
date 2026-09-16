@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dncore/wgtun/internal/paths"
@@ -56,14 +57,20 @@ func InstallLaunchd() error {
 
 	dst := filepath.Join("/Library/LaunchDaemons", launchdLabel+".plist")
 	if _, err := os.Stat(dst); err == nil {
-		launchctl("bootout", "system", launchdLabel)
+		// The service-target form is required: a bare label is rejected with
+		// "Boot-out failed: 5: Input/output error" and the old job stays
+		// loaded, which makes the bootstrap below fail with the same error.
+		// Failing here just means no job was loaded, so warn and carry on.
+		if err := launchctl("bootout", "system/"+launchdLabel); err != nil {
+			fmt.Printf("warning: %v\n", err)
+		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	if err := os.WriteFile(dst, []byte(plist), 0o644); err != nil {
 		return err
 	}
-	if out, err := exec.Command("launchctl", "bootstrap", "system", dst).CombinedOutput(); err != nil {
-		return fmt.Errorf("bootstrap: %v: %s", err, out)
+	if err := launchctl("bootstrap", "system", dst); err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
 	}
 	fmt.Printf("installed and started %s (%s daemon)\n", launchdLabel, exe)
 	return nil
@@ -75,7 +82,7 @@ func UninstallLaunchd() error {
 		return fmt.Errorf("must run as root (sudo)")
 	}
 	dst := filepath.Join("/Library/LaunchDaemons", launchdLabel+".plist")
-	launchctl("bootout", "system", launchdLabel)
+	launchctl("bootout", "system/"+launchdLabel)
 	time.Sleep(500 * time.Millisecond)
 	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
 		return err
@@ -84,6 +91,12 @@ func UninstallLaunchd() error {
 	return nil
 }
 
-func launchctl(args ...string) {
-	exec.Command("launchctl", args...).Run()
+// launchctl runs launchctl, folding its output into the error so failures read
+// as "Boot-out failed: 5: Input/output error" rather than a bare exit status.
+func launchctl(args ...string) error {
+	out, err := exec.Command("launchctl", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("launchctl %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
