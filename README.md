@@ -234,13 +234,18 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-Users upgrade with `brew update && brew upgrade wgtun`.
+Users upgrade with `brew update && brew upgrade wgtun`. If the LaunchDaemon
+was installed with `wgtun daemon --install`, re-run it once when upgrading
+from 0.2.1 or earlier: those versions baked the versioned
+`Cellar/wgtun/<version>/bin/wgtun` path into the plist, and `brew upgrade`
+deletes that directory (0.2.2+ writes the stable `bin/wgtun` symlink).
 
 ## Troubleshooting
 
 | Symptom | Check |
 |---|---|
 | TUI says `daemon offline` | `sudo wgtun daemon --install`; socket at `/var/run/wgtun.sock` |
+| Daemon stops starting after `brew upgrade` | `sudo wgtun daemon --install` — 0.2.1 and earlier wrote a versioned `Cellar/...` path into the plist |
 | Instance up but no handshake | Logs tab, or `/var/log/wgtun/events.jsonl`; check endpoint DNS |
 | Instance keeps restarting | Logs tab shows the reason; backoff pauses after 5 failures |
 | Port conflict on save | The editor names the conflicting instance or host process |

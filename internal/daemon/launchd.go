@@ -23,10 +23,11 @@ func InstallLaunchd() error {
 	if err != nil {
 		return err
 	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return err
-	}
+	// Deliberately not EvalSymlinks'd: Homebrew installs bin/wgtun as a symlink
+	// into Cellar/wgtun/<version>/bin/, and baking that versioned target into
+	// the plist leaves the LaunchDaemon unable to exec after `brew upgrade`
+	// removes the directory — silently, until the next boot. os.Executable()
+	// returns the symlink as invoked (absolute), which survives upgrades.
 	if err := os.MkdirAll(paths.LogDir, 0o755); err != nil {
 		return err
 	}
@@ -64,7 +65,7 @@ func InstallLaunchd() error {
 	if out, err := exec.Command("launchctl", "bootstrap", "system", dst).CombinedOutput(); err != nil {
 		return fmt.Errorf("bootstrap: %v: %s", err, out)
 	}
-	fmt.Printf("installed and started %s\n", launchdLabel)
+	fmt.Printf("installed and started %s (%s daemon)\n", launchdLabel, exe)
 	return nil
 }
 

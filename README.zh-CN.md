@@ -220,13 +220,17 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-用户升级：`brew update && brew upgrade wgtun`。
+用户升级：`brew update && brew upgrade wgtun`。若 LaunchDaemon 是用
+`wgtun daemon --install` 安装的，从 0.2.1 及更早版本升级后需重跑一次：那些
+版本会把带版本号的 `Cellar/wgtun/<version>/bin/wgtun` 路径写进 plist，而
+`brew upgrade` 会删除该目录（0.2.2 起写入稳定的 `bin/wgtun` 符号链接）。
 
 ## 故障排查
 
 | 现象 | 检查 |
 |---|---|
 | TUI 显示 `daemon offline` | `sudo wgtun daemon --install`；socket 位于 `/var/run/wgtun.sock` |
+| `brew upgrade` 后 daemon 不再启动 | `sudo wgtun daemon --install` —— 0.2.1 及更早版本会把带版本号的 `Cellar/...` 路径写进 plist |
 | 实例已启动但无握手 | 日志页或 `/var/log/wgtun/events.jsonl`；检查端点 DNS |
 | 实例反复重启 | 日志页有原因；连续 5 次失败后会自动退避 |
 | 保存时报端口冲突 | 编辑器会指出冲突的实例名或宿主进程 |
