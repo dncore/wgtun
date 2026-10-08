@@ -76,28 +76,52 @@ func Set(sockPath string, req SetRequest) error {
 	}
 	b.WriteString("replace_peers=true\n")
 	for _, p := range req.Peers {
-		hex, err := wgconf.KeyHex(p.PublicKey)
+		if err := writePeer(&b, p); err != nil {
+			return err
+		}
+	}
+	b.WriteString("\n")
+	return applySet(sockPath, b.String())
+}
+
+// writePeer renders one peer block. It carries replace_allowed_ips, so callers
+// must pass the complete allowed-IP list they want the peer to end up with.
+func writePeer(b *strings.Builder, p SetPeer) error {
+	hex, err := wgconf.KeyHex(p.PublicKey)
+	if err != nil {
+		return fmt.Errorf("peer public key: %v", err)
+	}
+	fmt.Fprintf(b, "public_key=%s\n", hex)
+	if p.PresharedKey != "" {
+		hex, err := wgconf.KeyHex(p.PresharedKey)
 		if err != nil {
-			return fmt.Errorf("peer public key: %v", err)
+			return fmt.Errorf("peer preshared key: %v", err)
 		}
-		fmt.Fprintf(&b, "public_key=%s\n", hex)
-		if p.PresharedKey != "" {
-			hex, err := wgconf.KeyHex(p.PresharedKey)
-			if err != nil {
-				return fmt.Errorf("peer preshared key: %v", err)
-			}
-			fmt.Fprintf(&b, "preshared_key=%s\n", hex)
-		}
-		if p.Endpoint != "" {
-			fmt.Fprintf(&b, "endpoint=%s\n", p.Endpoint)
-		}
-		if p.PersistentKeepalive != 0 {
-			fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", p.PersistentKeepalive)
-		}
-		b.WriteString("replace_allowed_ips=true\n")
-		for _, ip := range p.AllowedIPs {
-			fmt.Fprintf(&b, "allowed_ip=%s\n", ip)
-		}
+		fmt.Fprintf(b, "preshared_key=%s\n", hex)
+	}
+	if p.Endpoint != "" {
+		fmt.Fprintf(b, "endpoint=%s\n", p.Endpoint)
+	}
+	if p.PersistentKeepalive != 0 {
+		fmt.Fprintf(b, "persistent_keepalive_interval=%d\n", p.PersistentKeepalive)
+	}
+	b.WriteString("replace_allowed_ips=true\n")
+	for _, ip := range p.AllowedIPs {
+		fmt.Fprintf(b, "allowed_ip=%s\n", ip)
+	}
+	return nil
+}
+
+// UpsertPeer creates or updates one peer without touching any other and
+// without replace_peers, so existing peers keep their sessions — the same
+// thing `wg set <if> peer <key> allowed-ips ... endpoint ...` does. Use it to
+// hand a peer its endpoint and allowed IPs when the device never received them
+// (a push that happened before DNS was up, or a peer the device refused).
+func UpsertPeer(sockPath string, p SetPeer) error {
+	var b strings.Builder
+	b.WriteString("set=1\n")
+	if err := writePeer(&b, p); err != nil {
+		return err
 	}
 	b.WriteString("\n")
 	return applySet(sockPath, b.String())

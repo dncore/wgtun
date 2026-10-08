@@ -92,6 +92,31 @@ func TestFilePersistAndQuery(t *testing.T) {
 	}
 }
 
+func TestFileQueryLimitKeepsNewest(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "e.jsonl")
+	s, err := New(path, 100, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		s.Info("wg0", "event %02d", i)
+	}
+	s2, err := New(path, 100, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s2.QueryFile(Filter{Limit: 3})
+	if len(got) != 3 {
+		t.Fatalf("limit: got %d events", len(got))
+	}
+	// A limited history query must be the newest slice, newest first —
+	// returning the oldest N makes a long-running log view look frozen.
+	if got[0].Msg != "event 09" || got[2].Msg != "event 07" {
+		t.Fatalf("limit must keep the newest events, got %v .. %v", got[0].Msg, got[2].Msg)
+	}
+}
+
 func TestRotation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "e.jsonl")

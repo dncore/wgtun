@@ -69,6 +69,9 @@ type inst struct {
 	statusAt time.Time
 	// lastEPCheck is when hostname peer endpoints were last re-resolved
 	lastEPCheck time.Time
+	// peerRetry counts consecutive endpoint fills for peers the device has not
+	// accepted yet, so a refused peer cannot be re-pushed forever
+	peerRetry map[string]int
 }
 
 func (i *inst) running() bool { return i.pid != 0 }
@@ -261,29 +264,84 @@ func (s *Supervisor) probeLocked(i *inst) {
 	s.tryStartLocked(i)
 }
 
-// maybeFillEndpointsLocked re-resolves DNS for peers whose live endpoint is
-// empty (e.g. DNS was not ready at start) and re-pushes the config when it
-// succeeds. This is the "wake up before network" self-heal.
+// peerFillGiveUp is how many consecutive surgical pushes one peer gets before
+// the daemon concludes the device is refusing it and stops retrying. Only a
+// peer the device silently drops can get here — wireguard-go accepts a peer
+// whose public key equals the device's own and then ignores it — and without a
+// cap the 5s reconcile tick would re-push it forever.
+const peerFillGiveUp = 6
+
+// maybeFillEndpointsLocked gives endpoints to peers whose live endpoint is
+// missing: the "came up before the network did" self-heal.
+//
+// It never sends replace_peers. A peer that exists without an endpoint only
+// needs the endpoint; one the device refused needs its whole peer block. Both
+// are single-peer UAPI writes, so retrying while DNS is still down cannot reset
+// the sessions of the healthy peers (this used to re-push the entire config,
+// replace_peers and all, every 5 seconds until the resolver answered).
 func (s *Supervisor) maybeFillEndpointsLocked(i *inst, st *uapi.DeviceStatus) {
-	need := false
 	for _, p := range i.conf.Peers {
 		if p.Endpoint == "" {
 			continue
 		}
 		live := findLivePeer(st, p.PublicKey)
-		if live == nil || live.Endpoint == "" {
-			need = true
-			break
+		if live != nil && live.Endpoint != "" {
+			delete(i.peerRetry, p.PublicKey) // healthy: forget any backoff
+			continue
 		}
+		if i.peerRetry[p.PublicKey] >= peerFillGiveUp {
+			continue // already reported; a config change or restart retries
+		}
+		resolved, err := resolveEndpoint(p.Endpoint)
+		if err != nil {
+			// Usually DNS not being up yet right after boot: keep asking, this
+			// clears itself as soon as the resolver answers.
+			s.ev.Warn(i.name, "endpoint %s unresolved (will retry): %v", p.Endpoint, err)
+			continue
+		}
+		if live == nil {
+			// The device has no such peer, so its allowed IPs are missing too:
+			// only a full peer block can fix that.
+			err = uapi.UpsertPeer(i.uapiPath(), uapi.SetPeer{
+				PublicKey:           p.PublicKey,
+				PresharedKey:        p.PresharedKey,
+				Endpoint:            resolved,
+				AllowedIPs:          prefixesToStrings(p.AllowedIPs),
+				PersistentKeepalive: p.PersistentKeepalive,
+			})
+		} else {
+			err = uapi.SetPeerEndpoint(i.uapiPath(), p.PublicKey, resolved)
+		}
+		if err != nil {
+			s.ev.Warn(i.name, "endpoint push for %s failed: %v", p.Endpoint, err)
+			continue
+		}
+		if live == nil {
+			if i.bumpPeerRetry(p.PublicKey) == peerFillGiveUp {
+				s.ev.Error(i.name, "peer %s still absent from the device after %d pushes, giving up; wireguard-go silently drops a peer whose public key equals this instance's own", abbrevKey(p.PublicKey), peerFillGiveUp)
+			}
+			continue
+		}
+		s.ev.Info(i.name, "endpoint %s resolved and pushed", resolved)
 	}
-	if !need {
-		return
+}
+
+// bumpPeerRetry counts one more rejected endpoint fill for a peer key.
+// Lazily initialised so a hand-built inst (tests) cannot panic on assignment.
+func (i *inst) bumpPeerRetry(key string) int {
+	if i.peerRetry == nil {
+		i.peerRetry = map[string]int{}
 	}
-	if err := s.pushConfLocked(i); err != nil {
-		s.ev.Warn(i.name, "endpoint re-resolve push failed: %v", err)
-	} else {
-		s.ev.Info(i.name, "endpoint resolved and config re-pushed")
+	i.peerRetry[key]++
+	return i.peerRetry[key]
+}
+
+// abbrevKey shortens a base64 key for log lines.
+func abbrevKey(k string) string {
+	if len(k) <= 12 {
+		return k
 	}
+	return k[:12] + "..."
 }
 
 // maybeRefreshEndpointsLocked re-resolves hostname peer endpoints and
@@ -618,6 +676,7 @@ func (s *Supervisor) cleanupLocked(i *inst) {
 	os.RemoveAll(i.runtimeDir())
 	i.pid, i.tun, i.status = 0, "", nil
 	i.lastEPCheck = time.Time{}
+	i.peerRetry = nil
 	i.adopted = false
 }
 

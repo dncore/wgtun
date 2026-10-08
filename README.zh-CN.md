@@ -88,7 +88,7 @@ wgtun 用两个部件取代这一切：
 
  14:02:11  INFO   work    started on utun0 (pid 1234)
  14:03:40  WARN   home    endpoint vpn.example.com unresolved (will retry)
- 14:05:02  INFO   work    endpoint resolved and config re-pushed
+ 14:05:02  INFO   work    endpoint resolved and pushed
  14:07:31  ERROR  home    instance unhealthy (process dead), cleaning up for restart
  14:07:32  INFO   home    started on utun7 (pid 1387)
 ```
@@ -158,7 +158,8 @@ daemon 启动时会检测 `wireguard-go`（路径与版本显示在设置页）�
   wg-quick 完全一致。
 - **自愈而非仅重启。** 收敛循环每 5 秒经 UAPI 探活每个运行中的实例：进程
   死亡或 socket 僵死会清理（杀进程 + 清运行时目录）并按退避重启（10 分钟
-  内失败 5 次 → 暂停 5 分钟）。开机时 DNS 未就绪的端点稍后重解析并重推。
+  内失败 5 次 → 暂停 5 分钟）。开机时 DNS 未就绪的端点稍后重解析并推送，走
+  的是单 peer UAPI 写入：重试不会重置该实例其它健康 peer 的会话。
 - **端点 DNS 会被持续跟随，而不是一次写死。** WireGuard 只在建立配置时解
   析一次端点，之后仅靠入向报文漫游（roaming），因此 DDNS 域名改指新地址
   后，隧道会一直打向当初记住的那个地址。收敛循环因此每 60s 重新解析所有
@@ -169,7 +170,10 @@ daemon 启动时会检测 `wireguard-go`（路径与版本显示在设置页）�
   永不重解析。请把解析记录的 TTL 控制在 60s 以内：系统解析器会按 TTL 缓存
   结果，这正是变更被感知速度的下限。
 - **崩溃收养。** 守护进程自身崩溃时 wireguard-go 进程继续存活；下次启动按
-  pid + socket 探活收养它们——守护进程重启不会中断隧道。
+  pid + socket 探活收养它们——守护进程重启不会中断隧道。前提是 plist 要求
+  launchd 放过我们的进程组（`AbandonProcessGroup`，否则 `launchctl bootout`
+  会把隧道一起带走）；代价是 `daemon --uninstall` 必须自己收尾，且只会对
+  经 `ps` 确认仍是 wireguard-go 的 pid 发信号。
 - **开机语义。** 启用自启的实例开机自动拉起。干净退出标记区分「整机重启」
   （应用自启）与「守护进程重启」（尊重你手动停止的状态）。
 - **只有一个特权组件。** 你永远不需要 `sudo wgtun`；TUI 经 unix socket 与
@@ -244,6 +248,8 @@ git push origin v0.2.0
 | `brew upgrade` 后 daemon 不再启动 | `sudo wgtun daemon --install` —— 0.2.1 及更早版本会把带版本号的 `Cellar/...` 路径写进 plist |
 | 实例已启动但无握手 | 日志页或 `/var/log/wgtun/events.jsonl`；检查端点 DNS |
 | 实例反复重启 | 日志页有原因；连续 5 次失败后会自动退避 |
+| 日志出现 `still absent from the device ... giving up` | 该 peer 的公钥与本实例自己的公钥相同；wireguard-go 会返回 `errno=0` 但静默丢弃这个 peer |
+| 开机时 DNS 未就绪，某个 peer 迟迟没有端点 | 预期行为：daemon 会持续重试单 peer 推送，解析器可用前 `unresolved (will retry)` 警告会反复出现 |
 | 对端 IP 变更后隧道断掉且日志没有 `dns changed` 事件 | DDNS 记录 TTL 大于 60s，解析器仍在返回旧答案，请调低 TTL。若配置里端点写成字面量 `ip:port`，按设计不会被重解析 |
 | 保存时报端口冲突 | 编辑器会指出冲突的实例名或宿主进程 |
 

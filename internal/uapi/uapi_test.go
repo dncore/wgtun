@@ -202,6 +202,46 @@ func TestSetPeerEndpointIsSurgical(t *testing.T) {
 	}
 }
 
+func TestUpsertPeerIsSurgical(t *testing.T) {
+	fs := newFakeServer(t, "errno=0\n\n")
+	pub := h2b(t, "a1a2a3a4a5a6a7a8a9aab1b2b3b4b5b6b7b8b9bac1c2c3c4c5c6c7c8c9cad0d1")
+	psk := h2b(t, "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1")
+	err := UpsertPeer(fs.sockPath, SetPeer{
+		PublicKey:           pub,
+		PresharedKey:        psk,
+		Endpoint:            "198.51.100.7:51820",
+		AllowedIPs:          []string{"198.51.100.0/24", "198.51.100.0/25"},
+		PersistentKeepalive: 25,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := <-fs.got
+	for _, want := range []string{
+		"set=1\n",
+		"public_key=a1a2a3a4a5a6a7a8a9aab1b2b3b4b5b6b7b8b9bac1c2c3c4c5c6c7c8c9cad0d1\n",
+		"preshared_key=b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1\n",
+		"endpoint=198.51.100.7:51820\n",
+		"persistent_keepalive_interval=25\n",
+		"replace_allowed_ips=true\n",
+		"allowed_ip=198.51.100.0/24\n",
+		"allowed_ip=198.51.100.0/25\n",
+	} {
+		if !strings.Contains(req, want) {
+			t.Errorf("request missing %q\ngot:\n%s", want, req)
+		}
+	}
+	// one peer only: no device-level or peer-replacing keys
+	for _, bad := range []string{"replace_peers", "private_key=", "listen_port="} {
+		if strings.Contains(req, bad) {
+			t.Errorf("request must not contain %q\ngot:\n%s", bad, req)
+		}
+	}
+	if !strings.HasSuffix(req, "\n\n") {
+		t.Error("request must end with blank line")
+	}
+}
+
 func TestSetPeerEndpointBadKey(t *testing.T) {
 	fs := newFakeServer(t, "errno=0\n\n")
 	if err := SetPeerEndpoint(fs.sockPath, "not-a-key", "198.51.100.7:51820"); err == nil {

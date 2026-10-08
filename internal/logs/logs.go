@@ -68,11 +68,11 @@ type Store struct {
 	head int     // next write position
 	n    int     // current count
 
-	path     string
-	maxSize  int64
-	subs     map[int]chan Event
-	nextSub  int
-	lastErr  error
+	path    string
+	maxSize int64
+	subs    map[int]chan Event
+	nextSub int
+	lastErr error
 }
 
 // New opens (creating if needed) the JSONL event log at path and keeps a
@@ -182,7 +182,7 @@ func (s *Store) LastErr() error {
 // Filter selects events for Query.
 type Filter struct {
 	Instance string // exact match, empty = all
-	MinLevel Level   // events with level >= MinLevel
+	MinLevel Level  // events with level >= MinLevel
 	Since    time.Time
 	Until    time.Time
 	Text     string // case-insensitive substring on Msg
@@ -237,8 +237,11 @@ func (s *Store) QueryFile(f Filter) []Event {
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
 	}
+	// Limit keeps the NEWEST events: after the reversal above those are the
+	// first ones, so trim the tail (keeping the last Limit used to hand back
+	// the oldest N and read as "no recent activity" in the log view).
 	if f.Limit > 0 && len(out) > f.Limit {
-		out = out[len(out)-f.Limit:]
+		out = out[:f.Limit]
 	}
 	return out
 }

@@ -91,7 +91,7 @@ filters (`i` instance, `l` level) and live follow (`f`):
 
  14:02:11  INFO   work    started on utun0 (pid 1234)
  14:03:40  WARN   home    endpoint vpn.example.com unresolved (will retry)
- 14:05:02  INFO   work    endpoint resolved and config re-pushed
+ 14:05:02  INFO   work    endpoint resolved and pushed
  14:07:31  ERROR  home    instance unhealthy (process dead), cleaning up for restart
  14:07:32  INFO   home    started on utun7 (pid 1387)
 ```
@@ -166,7 +166,8 @@ to install instead of failing silently at first tunnel start.
   probes each running instance over UAPI. A dead process or a wedged
   socket is cleaned up (kill + runtime dir) and restarted with backoff
   (5 failed starts in 10 min → 5 min pause). Endpoints whose DNS was not
-  ready at boot are re-resolved and re-pushed later.
+  ready at boot are re-resolved and pushed later, as one-peer UAPI writes:
+  retrying cannot reset the sessions of the instance's healthy peers.
 - **Endpoint DNS is followed, not frozen.** WireGuard resolves a peer
   endpoint once and then only roams on inbound packets, so a DDNS name
   that starts pointing somewhere else would leave the tunnel hammering
@@ -182,7 +183,11 @@ to install instead of failing silently at first tunnel start.
   seen.
 - **Crash adoption.** If the daemon itself dies, the wireguard-go
   processes keep running; the next daemon start adopts them by pid +
-  socket liveness — tunnels are not interrupted by daemon restarts.
+  socket liveness — tunnels are not interrupted by daemon restarts. That
+  depends on the plist asking launchd to spare our process group
+  (`AbandonProcessGroup`, or `launchctl bootout` takes the tunnels down
+  with the job); the price is that `daemon --uninstall` reaps them itself,
+  verifying each pid still runs wireguard-go before signalling it.
 - **Boot semantics.** Enabled instances come up at boot. A clean-shutdown
   marker distinguishes a reboot (apply autostart) from a plain daemon
   restart (respect whatever you had stopped).
@@ -264,6 +269,8 @@ deletes that directory (0.2.2+ writes the stable `bin/wgtun` symlink).
 | Daemon stops starting after `brew upgrade` | `sudo wgtun daemon --install` — 0.2.1 and earlier wrote a versioned `Cellar/...` path into the plist |
 | Instance up but no handshake | Logs tab, or `/var/log/wgtun/events.jsonl`; check endpoint DNS |
 | Instance keeps restarting | Logs tab shows the reason; backoff pauses after 5 failures |
+| Log says a peer `still absent from the device ... giving up` | The peer's public key equals the instance's own public key; wireguard-go accepts it with `errno=0` and silently drops the peer |
+| A peer never gets an endpoint while DNS is down at boot | Expected: the daemon retries the one-peer push, and the warning repeats until the resolver answers |
 | Tunnel dies after the remote IP changed, no `dns changed` event | DDNS record TTL is above 60s, so the resolver still serves the old answer; lower it. If the endpoint is written as a literal `ip:port` in the config it is never re-resolved by design |
 | Port conflict on save | The editor names the conflicting instance or host process |
 
