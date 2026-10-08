@@ -181,6 +181,16 @@ to install instead of failing silently at first tunnel start.
   Keep the record's TTL at 60s or lower: the system resolver caches the
   answer for its TTL, which is the floor on how fast a change can be
   seen.
+- **The TTL is the real floor.** Detection can never be faster than the
+  record's TTL, because every resolver between the daemon and the
+  authoritative server caches the old answer for that long (a 10 minute
+  TTL means up to ~11 minutes to recover, however often the daemon looks).
+  Two ways out when the provider's minimum TTL is too long: shorten the
+  TTL, or stop depending on DNS for the *reverse* direction by putting
+  `PersistentKeepalive = 25` on the peer that faces this machine on the
+  remote side — its packets then arrive from the new address and
+  WireGuard's own roaming retargets our endpoint in about 25s, with no
+  lookup involved.
 - **Crash adoption.** If the daemon itself dies, the wireguard-go
   processes keep running; the next daemon start adopts them by pid +
   socket liveness — tunnels are not interrupted by daemon restarts. That

@@ -169,6 +169,12 @@ daemon 启动时会检测 `wireguard-go`（路径与版本显示在设置页）�
   通道，不必等满一个周期。配置里写成字面量 `ip:port` 的端点始终视为权威，
   永不重解析。请把解析记录的 TTL 控制在 60s 以内：系统解析器会按 TTL 缓存
   结果，这正是变更被感知速度的下限。
+- **TTL 才是真正的下限。** 检测不可能快过解析记录的 TTL：daemon 与权威服务
+  器之间的每一层解析器都会按 TTL 缓存旧答案（TTL 10 分钟就意味着最坏 ~11
+  分钟才恢复，无论 daemon 查得多勤）。若服务商允许的最小 TTL 太长，只有两条
+  出路：缩短 TTL，或者让「反向」不再依赖 DNS —— 在远端的、面向本机的那个
+  peer 上加 `PersistentKeepalive = 25`，它的包会从新地址到达，WireGuard
+  自身的 roaming 会在约 25s 内把我们的 endpoint 改过来，完全不涉及域名解析。
 - **崩溃收养。** 守护进程自身崩溃时 wireguard-go 进程继续存活；下次启动按
   pid + socket 探活收养它们——守护进程重启不会中断隧道。前提是 plist 要求
   launchd 放过我们的进程组（`AbandonProcessGroup`，否则 `launchctl bootout`
