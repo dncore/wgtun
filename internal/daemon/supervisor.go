@@ -660,7 +660,7 @@ func (s *Supervisor) cleanupLocked(i *inst) {
 			i.pid = p
 		}
 	}
-	if i.pid != 0 && pidAlive(i.pid) {
+	if i.pid != 0 && pidAlive(i.pid) && i.ownsProcess() {
 		syscall.Kill(i.pid, syscall.SIGTERM)
 		deadline := time.Now().Add(3 * time.Second)
 		for pidAlive(i.pid) && time.Now().Before(deadline) {
@@ -678,6 +678,19 @@ func (s *Supervisor) cleanupLocked(i *inst) {
 	i.lastEPCheck = time.Time{}
 	i.peerRetry = nil
 	i.adopted = false
+}
+
+// ownsProcess reports whether the recorded pid really is this instance's
+// wireguard-go. A pid file outlives its process, and once the OS recycles that
+// pid the daemon would otherwise SIGTERM an unrelated process — as root. The
+// UAPI socket holder is proof; failing that (the device is wedged or already
+// gone, which is exactly when we get here) demand that the pid still looks like
+// wireguard-go.
+func (i *inst) ownsProcess() bool {
+	if pid := socketPid(i.uapiPath()); pid != 0 && pid == i.pid {
+		return true
+	}
+	return isWireGuardGo(i.pid)
 }
 
 // pumpWireguardLogs forwards wireguard-go stderr lines into the event log.

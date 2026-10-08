@@ -123,11 +123,21 @@ func readPidFile(path string) int {
 	return pid
 }
 
-// isWireGuardGo reports whether a pid currently runs wireguard-go, so an
-// uninstall never signals a pid that was recycled by another process.
+// isWireGuardGo reports whether a pid currently runs wireguard-go, so the
+// daemon never signals a pid that was recycled by another process. It is used
+// both by the uninstall reaper and by cleanupLocked, which runs as root.
 func isWireGuardGo(pid int) bool {
 	out, err := exec.Command("/bin/ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
-	return err == nil && strings.Contains(string(out), "wireguard-go")
+	if err != nil {
+		return false
+	}
+	comm := strings.TrimSpace(string(out))
+	if comm == "" {
+		return false
+	}
+	// The configured path may be a custom build; the basename check covers a
+	// renamed installation of the binary we actually launch.
+	return comm == paths.WireGuardGo || strings.Contains(filepath.Base(comm), "wireguard-go")
 }
 
 // launchdPlist renders the LaunchDaemon.
