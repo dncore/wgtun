@@ -36,6 +36,7 @@ wgtun replaces all of that with two pieces:
 | Multiple tunnels | one script per tunnel | any number, one supervisor |
 | Boot autostart | per-interface launchd plists | per-instance flag |
 | Crash recovery | usually none | adopt + self-heal + backoff |
+| Endpoint DNS | resolved once at start, then stale for good | re-resolved and retargeted in place (DDNS) |
 | Live state | `wg show` parsing | native UAPI, structured data |
 | Config editing | edit files by hand | TUI editor with conflict checks |
 | Logs | un-timestamped stderr dumps | structured events, replay + follow |
@@ -168,29 +169,10 @@ to install instead of failing silently at first tunnel start.
   (5 failed starts in 10 min → 5 min pause). Endpoints whose DNS was not
   ready at boot are re-resolved and pushed later, as one-peer UAPI writes:
   retrying cannot reset the sessions of the instance's healthy peers.
-- **Endpoint DNS is followed, not frozen.** WireGuard resolves a peer
-  endpoint once and then only roams on inbound packets, so a DDNS name
-  that starts pointing somewhere else would leave the tunnel hammering
-  the address it memorised. The reconcile loop therefore re-resolves
-  every `hostname:port` endpoint every 60s and retargets the peer in
-  place (no `replace_peers`, so sessions and other peers are untouched)
-  when the answer moved. A peer whose handshake went stale — the
-  signature of a name that now points at a dead address — is re-checked
-  on a 15s floor instead of waiting out the interval. Literal `ip:port`
-  endpoints are always taken as authoritative and never re-resolved.
-  Keep the record's TTL at 60s or lower: the system resolver caches the
-  answer for its TTL, which is the floor on how fast a change can be
-  seen.
-- **The TTL is the real floor.** Detection can never be faster than the
-  record's TTL, because every resolver between the daemon and the
-  authoritative server caches the old answer for that long (a 10 minute
-  TTL means up to ~11 minutes to recover, however often the daemon looks).
-  Two ways out when the provider's minimum TTL is too long: shorten the
-  TTL, or stop depending on DNS for the *reverse* direction by putting
-  `PersistentKeepalive = 25` on the peer that faces this machine on the
-  remote side — its packets then arrive from the new address and
-  WireGuard's own roaming retargets our endpoint in about 25s, with no
-  lookup involved.
+- **Endpoint DNS is followed, not frozen.** An endpoint written as a hostname
+  is re-resolved on a schedule and retargeted in place when the answer moves,
+  so a DDNS name stays a live address instead of a value frozen at boot —
+  see [Endpoint DNS following](#endpoint-dns-following-ddns).
 - **Crash adoption.** If the daemon itself dies, the wireguard-go
   processes keep running; the next daemon start adopts them by pid +
   socket liveness — tunnels are not interrupted by daemon restarts. That
@@ -209,6 +191,104 @@ to install instead of failing silently at first tunnel start.
 > process exits, so the daemon considers the **holder of the UAPI socket**
 > (`lsof -t /var/run/wireguard/<tun>.sock`) to be the authoritative
 > instance pid, not the value returned by `exec`.
+
+## Endpoint DNS following (DDNS)
+
+A peer whose `Endpoint` is a hostname (`vpn.example.com:51820`) is treated as a
+*moving* address, not as a value to resolve once at start-up. WireGuard itself
+resolves an endpoint exactly once and afterwards only updates it from inbound
+packets ("roaming"), so a DDNS name re-bound to a new address would leave the
+tunnel hammering the address it memorised until someone restarted the
+interface. wgtun re-resolves the name itself and retargets the peer in place.
+
+**How a change is detected.** Every 5 seconds the reconcile loop probes each
+running instance over the UAPI socket, which also refreshes the endpoint the
+device is *actually* using and its last handshake time. On a due check the name
+is re-resolved and compared against that live value:
+
+```
+5s tick
+  │
+  ├─ probe instance (UAPI get=1) ──► live endpoint + last handshake time
+  │
+  ├─ endpoint a hostname? ───────────── no ──► literal ip:port, never touched
+  │                                   yes
+  ├─ check due? ────────────┐
+  │  (last check >= 60s,
+  │   or >= 15s and handshake stale > 150s)
+  │                         │ yes
+  │                         ▼
+  │                    resolve every A/AAAA the name answers with
+  │                         │
+  │      live endpoint equals any candidate? ── yes ──► silent no-op
+  │                         │ no
+  └──────────────────────► set=1 public_key=<peer> endpoint=<new ip:port>
+                           (no replace_peers) ──► INFO endpoint old -> new
+```
+
+**Two lanes (not to scale).** A healthy tunnel is re-checked every 60 seconds —
+about the shortest TTL a DDNS record realistically carries, so a cached answer
+is not interrogated faster than it can change. A peer whose handshake has gone
+older than 150 seconds (more than one rekey period: the signature of a name
+that now points at a dead address) is re-checked on a 15 second floor instead,
+so recovery does not wait out the interval. Peers that never handshaked stay on
+the slow lane on purpose: an idle peer is indistinguishable from an unreachable
+one, and guessing would hold the fast lane open forever.
+
+```
+healthy tunnel   ├──── 60s ────┼──── 60s ────┼──── 60s ────┤
+wedged tunnel    ├── 15s ──┼── 15s ──┼── 15s ──┼── 15s ──┼── 15s ──┤
+                           ▲
+          a handshake older than 150s opens the fast lane
+```
+
+**The update is surgical.** Retargeting sends one peer block and nothing else,
+so session keys, allowed IPs and the keepalive survive; only the destination
+address changes. Addresses, MTU and routes are not touched.
+
+```
+targeted (what a change sends)      full re-push (deliberately avoided)
+  set=1                               set=1
+  public_key=<peer>                   private_key=...
+  endpoint=<new ip:port>              replace_peers=true  <- drops every peer
+                                      public_key=<peer>
+                                      replace_allowed_ips=true
+                                      allowed_ip=192.0.2.0/24
+```
+
+The same one-peer writes are used to hand an endpoint to a peer the device
+never accepted, and to fill in an endpoint whose DNS was not up yet at boot;
+both are capped so a peer the device keeps refusing cannot be re-pushed on
+every tick forever.
+
+**What it deliberately does not do.** A literal `ip:port` endpoint is
+authoritative and never re-resolved. Multi-answer records are compared as a
+set: if the device already uses any one of the answers nothing happens, so a
+round-robin record cannot make the daemon flip between equivalent addresses. A
+name that resolves to an address the tunnel cannot reach is still pushed —
+reachability is not probed first — and that is what lets the tunnel recover by
+itself within one interval after the record is corrected.
+
+**The record's TTL is the floor.** Detection cannot be faster than the TTL: every
+resolver between the daemon and the authoritative server caches the old answer
+for exactly that long, and looking more often neither refreshes nor expires
+that cache. Measured against a real DDNS record carrying a ten-minute TTL:
+
+```
+home IP changes            cache expires          retarget + handshake
+      │                          │                          │
+T ────┴── handshake stale ≤150s ─┴─── up to TTL (600s) ─────┴── ≤15s ──► up
+      └── fast lane on ─────────►│◄── cached: still the old address
+```
+
+Recovery therefore lands anywhere between ~20 seconds and TTL + ~1 minute,
+depending on how much of the cached answer's lifetime was left when the address
+changed. Two ways to remove the wait: keep the TTL at 60s or lower, or take DNS
+out of the reverse direction entirely by putting `PersistentKeepalive = 25` on
+the remote peer that faces this machine — its packets then arrive from the new
+address and WireGuard's own roaming retargets the endpoint in about 25 seconds,
+with no lookup involved. That second option also covers the case no amount of
+re-resolving can: a DDNS record that never gets updated at all.
 
 ## Configuration
 
