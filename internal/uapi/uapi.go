@@ -100,7 +100,30 @@ func Set(sockPath string, req SetRequest) error {
 		}
 	}
 	b.WriteString("\n")
-	resp, err := roundTrip(sockPath, b.String())
+	return applySet(sockPath, b.String())
+}
+
+// SetPeerEndpoint retargets a single peer's endpoint in place. Unlike Set it
+// does not send replace_peers, so the peer keeps its session keys, allowed
+// IPs and keepalive and only the destination address changes. endpoint must
+// already be a literal ip:port (resolve DNS first): the protocol rejects
+// hostnames.
+func SetPeerEndpoint(sockPath, publicKey, endpoint string) error {
+	hexKey, err := wgconf.KeyHex(publicKey)
+	if err != nil {
+		return fmt.Errorf("peer public key: %v", err)
+	}
+	var b strings.Builder
+	b.WriteString("set=1\n")
+	fmt.Fprintf(&b, "public_key=%s\n", hexKey)
+	fmt.Fprintf(&b, "endpoint=%s\n", endpoint)
+	b.WriteString("\n")
+	return applySet(sockPath, b.String())
+}
+
+// applySet sends a set=1 request and checks the errno reply.
+func applySet(sockPath, req string) error {
+	resp, err := roundTrip(sockPath, req)
 	if err != nil {
 		return err
 	}

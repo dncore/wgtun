@@ -26,7 +26,8 @@ wgtun replaces all of that with two pieces:
 
 - **A daemon** that owns every wireguard-go process and continuously
   reconciles reality against the desired state (adopt after crashes,
-  restart with backoff, re-resolve DNS that was not ready at boot).
+  restart with backoff, follow endpoint DNS — boot readiness and DDNS
+  re-binds alike).
 - **A TUI** that talks to the daemon over a local socket and gives you
   dashboards, instance management, a config editor and log replay.
 
@@ -149,6 +150,8 @@ to install instead of failing silently at first tunnel start.
  │                             │  0660)     │  native UAPI: set/get config        │
  └─────────────────────────────┘            │  ifconfig / route for addresses     │
                                             │  adopt · backoff · DNS re-resolve   │
+                                            │   ├─ not ready at boot              │
+                                            │   └─ DDNS name moved (60s)          │
                                             │  /var/lib/wgtun/state.json          │
                                             │  /var/log/wgtun/events.jsonl        │
                                             └─────────────────────────────────────┘
@@ -164,6 +167,19 @@ to install instead of failing silently at first tunnel start.
   socket is cleaned up (kill + runtime dir) and restarted with backoff
   (5 failed starts in 10 min → 5 min pause). Endpoints whose DNS was not
   ready at boot are re-resolved and re-pushed later.
+- **Endpoint DNS is followed, not frozen.** WireGuard resolves a peer
+  endpoint once and then only roams on inbound packets, so a DDNS name
+  that starts pointing somewhere else would leave the tunnel hammering
+  the address it memorised. The reconcile loop therefore re-resolves
+  every `hostname:port` endpoint every 60s and retargets the peer in
+  place (no `replace_peers`, so sessions and other peers are untouched)
+  when the answer moved. A peer whose handshake went stale — the
+  signature of a name that now points at a dead address — is re-checked
+  on a 15s floor instead of waiting out the interval. Literal `ip:port`
+  endpoints are always taken as authoritative and never re-resolved.
+  Keep the record's TTL at 60s or lower: the system resolver caches the
+  answer for its TTL, which is the floor on how fast a change can be
+  seen.
 - **Crash adoption.** If the daemon itself dies, the wireguard-go
   processes keep running; the next daemon start adopts them by pid +
   socket liveness — tunnels are not interrupted by daemon restarts.
@@ -248,6 +264,7 @@ deletes that directory (0.2.2+ writes the stable `bin/wgtun` symlink).
 | Daemon stops starting after `brew upgrade` | `sudo wgtun daemon --install` — 0.2.1 and earlier wrote a versioned `Cellar/...` path into the plist |
 | Instance up but no handshake | Logs tab, or `/var/log/wgtun/events.jsonl`; check endpoint DNS |
 | Instance keeps restarting | Logs tab shows the reason; backoff pauses after 5 failures |
+| Tunnel dies after the remote IP changed, no `dns changed` event | DDNS record TTL is above 60s, so the resolver still serves the old answer; lower it. If the endpoint is written as a literal `ip:port` in the config it is never re-resolved by design |
 | Port conflict on save | The editor names the conflicting instance or host process |
 
 ## Development

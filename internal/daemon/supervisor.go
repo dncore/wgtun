@@ -27,6 +27,26 @@ import (
 	"github.com/dncore/wgtun/internal/wire"
 )
 
+// Endpoint DNS re-validation. WireGuard resolves a peer endpoint once, at
+// config time, and afterwards only roams on inbound packets — so a DDNS name
+// that starts pointing somewhere else is never noticed on its own and the
+// tunnel keeps hammering the address it memorised. These three constants turn
+// the reconcile tick into a follow-up loop for that case.
+const (
+	// endpointRecheck is the periodic re-resolution interval. It matches the
+	// floor a DDNS record can realistically carry (its TTL), so checking
+	// faster would only burn queries on a cached answer.
+	endpointRecheck = 60 * time.Second
+	// endpointFastRecheck is the minimum spacing between two "the tunnel
+	// looks dead" checks, so a stale handshake cannot turn the 5s reconcile
+	// tick into a DNS flood.
+	endpointFastRecheck = 15 * time.Second
+	// handshakeStaleAfter is when a peer that has handshaken at least once
+	// counts as unreachable. WireGuard rekeys every ~2min, so 150s means no
+	// traffic could complete for at least one rekey period.
+	handshakeStaleAfter = 150 * time.Second
+)
+
 // inst is the runtime view of one configured instance.
 type inst struct {
 	name     string
@@ -45,8 +65,10 @@ type inst struct {
 	lastErr     string
 
 	// cached live status, refreshed by the reconcile probe
-	status    *uapi.DeviceStatus
-	statusAt  time.Time
+	status   *uapi.DeviceStatus
+	statusAt time.Time
+	// lastEPCheck is when hostname peer endpoints were last re-resolved
+	lastEPCheck time.Time
 }
 
 func (i *inst) running() bool { return i.pid != 0 }
@@ -226,6 +248,7 @@ func (s *Supervisor) probeLocked(i *inst) {
 		i.status, i.statusAt = st, time.Now()
 		i.failStreak = 0
 		s.maybeFillEndpointsLocked(i, st)
+		s.maybeRefreshEndpointsLocked(i, st)
 		return
 	}
 	i.failStreak++
@@ -261,6 +284,105 @@ func (s *Supervisor) maybeFillEndpointsLocked(i *inst, st *uapi.DeviceStatus) {
 	} else {
 		s.ev.Info(i.name, "endpoint resolved and config re-pushed")
 	}
+}
+
+// maybeRefreshEndpointsLocked re-resolves hostname peer endpoints and
+// retargets the peer when the DNS answer moved. It is the periodic follow-up
+// to maybeFillEndpointsLocked: that one covers "DNS was not ready yet" at
+// start, this one covers "DNS now says something else" — the DDNS case, where
+// the name is re-bound to a new address long after the tunnel came up.
+//
+// Only hostname endpoints are touched (a literal ip:port is authoritative)
+// and only the endpoint field is written, so an existing session survives
+// whenever the address did not actually change.
+func (s *Supervisor) maybeRefreshEndpointsLocked(i *inst, st *uapi.DeviceStatus) {
+	if !i.endpointCheckDue(st) {
+		return
+	}
+	i.lastEPCheck = time.Now()
+	for _, p := range i.conf.Peers {
+		if !isHostnameEndpoint(p.Endpoint) {
+			continue
+		}
+		live := findLivePeer(st, p.PublicKey)
+		if live == nil || live.Endpoint == "" {
+			// never pushed (or still empty): that is maybeFillEndpointsLocked's job
+			continue
+		}
+		candidates, err := resolveEndpointAll(p.Endpoint)
+		if err != nil {
+			s.ev.Warn(i.name, "endpoint %s unresolved (will retry): %v", p.Endpoint, err)
+			continue
+		}
+		// A round-robin record answers in a different order on every lookup;
+		// flipping between equivalent addresses is churn, not progress, so any
+		// candidate matching what the device already uses counts as unchanged.
+		if containsString(candidates, live.Endpoint) {
+			continue
+		}
+		if err := uapi.SetPeerEndpoint(i.uapiPath(), p.PublicKey, candidates[0]); err != nil {
+			s.ev.Warn(i.name, "endpoint re-resolve push failed: %v", err)
+			continue
+		}
+		s.ev.Info(i.name, "endpoint %s -> %s (%s changed), re-pushed", live.Endpoint, candidates[0], p.Endpoint)
+	}
+}
+
+// endpointCheckDue rate-limits DNS re-validation to the periodic interval,
+// plus a faster lane when a peer that used to handshake has gone quiet —
+// exactly the signature of a name that moved to a dead address.
+func (i *inst) endpointCheckDue(st *uapi.DeviceStatus) bool {
+	since := time.Since(i.lastEPCheck)
+	if since >= endpointRecheck {
+		return true
+	}
+	if since < endpointFastRecheck {
+		return false
+	}
+	return i.handshakeStale(st)
+}
+
+// handshakeStale reports whether a hostname peer that has handshaken before
+// has stopped doing so. Peers that never handshaked are ignored: an idle peer
+// looks exactly like an unreachable one, and guessing would hold the fast lane
+// open forever.
+func (i *inst) handshakeStale(st *uapi.DeviceStatus) bool {
+	cut := time.Now().Add(-handshakeStaleAfter)
+	for _, p := range i.conf.Peers {
+		if !isHostnameEndpoint(p.Endpoint) {
+			continue
+		}
+		live := findLivePeer(st, p.PublicKey)
+		if live == nil || live.Endpoint == "" || live.LastHandshake.IsZero() {
+			continue
+		}
+		if live.LastHandshake.Before(cut) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHostnameEndpoint reports whether an endpoint still needs DNS: a host:port
+// whose host is a name rather than a literal address.
+func isHostnameEndpoint(ep string) bool {
+	if ep == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(ep)
+	if err != nil {
+		return false
+	}
+	return net.ParseIP(host) == nil
+}
+
+func containsString(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 func findLivePeer(st *uapi.DeviceStatus, pubB64 string) *uapi.PeerStatus {
@@ -414,6 +536,8 @@ func (s *Supervisor) startLocked(i *inst) error {
 		i.lastErr = err.Error()
 		return err
 	}
+	// the endpoints were just resolved by the push
+	i.lastEPCheck = time.Now()
 	if err := netsetup(i.tun, i.conf); err != nil {
 		s.cleanupLocked(i)
 		i.lastErr = err.Error()
@@ -487,6 +611,7 @@ func (s *Supervisor) cleanupLocked(i *inst) {
 	}
 	os.RemoveAll(i.runtimeDir())
 	i.pid, i.tun, i.status = 0, "", nil
+	i.lastEPCheck = time.Time{}
 	i.adopted = false
 }
 
@@ -820,27 +945,55 @@ func prefixesToStrings(ps []netip.Prefix) []string {
 	return out
 }
 
-// resolveEndpoint resolves host:port to ip:port with a bounded timeout.
+// resolveEndpoint resolves host:port to the preferred ip:port. A literal
+// address is passed through untouched.
 func resolveEndpoint(ep string) (string, error) {
-	host, port, err := net.SplitHostPort(ep)
+	all, err := resolveEndpointAll(ep)
 	if err != nil {
 		return "", err
+	}
+	return all[0], nil
+}
+
+// resolveEndpointAll resolves host:port to every ip:port it may legitimately
+// point at (multi-A records have more than one), with a bounded timeout.
+func resolveEndpointAll(ep string) ([]string, error) {
+	host, port, err := net.SplitHostPort(ep)
+	if err != nil {
+		return nil, err
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return []string{ep}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var r net.Resolver
-	ips, err := r.LookupIPAddr(ctx, host)
+	addrs, err := lookupIPAddr(ctx, host)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if len(ips) == 0 {
-		return "", fmt.Errorf("no addresses for %s", host)
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("no addresses for %s", host)
 	}
-	ip := ips[0].IP.String()
-	if strings.Contains(ip, ":") {
-		return fmt.Sprintf("[%s]:%s", ip, port), nil
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		out = append(out, joinHostPort(a.IP, port))
 	}
-	return fmt.Sprintf("%s:%s", ip, port), nil
+	return out, nil
+}
+
+// lookupIPAddr is a test seam around the system resolver.
+var lookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	var r net.Resolver
+	return r.LookupIPAddr(ctx, host)
+}
+
+// joinHostPort formats an ip:port the way the UAPI protocol expects it:
+// bracketed for IPv6, bare for IPv4.
+func joinHostPort(ip net.IP, port string) string {
+	if ip.To4() != nil {
+		return ip.String() + ":" + port
+	}
+	return "[" + ip.String() + "]:" + port
 }
 
 func validName(name string) error {
