@@ -272,6 +272,12 @@ func TestEndpointCheckDue(t *testing.T) {
 		t.Error("a never-handshaked peer must not hold the fast lane open")
 	}
 
+	// ...and the same holds for the 1970 timestamp wireguard-go reports for
+	// "never handshaked" if a caller bypasses parseGet's normalisation
+	if i.endpointCheckDue(status(time.Unix(0, 0))) {
+		t.Error("an epoch-zero handshake must count as never handshaked")
+	}
+
 	// periodic interval: always due
 	i.lastEPCheck = now.Add(-endpointRecheck - time.Second)
 	if !i.endpointCheckDue(status(time.Time{})) {

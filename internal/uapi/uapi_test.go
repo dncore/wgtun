@@ -217,6 +217,28 @@ func TestSetPeerEndpointErrno(t *testing.T) {
 	}
 }
 
+// A peer that never handshaked reports 0 seconds; that must stay the zero
+// Time, otherwise IsZero() is false for "never" and the daemon cannot tell an
+// idle peer from a dead one (regression: the 15s DNS fast lane never closed).
+func TestGetNeverHandshakeIsZeroTime(t *testing.T) {
+	fs := newFakeServer(t, `errno=0
+public_key=a1a2a3a4a5a6a7a8a9aab1b2b3b4b5b6b7b8b9bac1c2c3c4c5c6c7c8c9cad0d1
+last_handshake_time_sec=0
+last_handshake_time_nsec=0
+
+`)
+	dev, err := Get(fs.sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dev.Peers) != 1 {
+		t.Fatalf("peers = %d", len(dev.Peers))
+	}
+	if !dev.Peers[0].LastHandshake.IsZero() {
+		t.Fatalf("never-handshaked peer must report the zero Time, got %v", dev.Peers[0].LastHandshake)
+	}
+}
+
 func TestGetErrno(t *testing.T) {
 	fs := newFakeServer(t, "errno=1\n\n")
 	if _, err := Get(fs.sockPath); err == nil {

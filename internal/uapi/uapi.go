@@ -210,9 +210,13 @@ func parseGet(resp string) (*DeviceStatus, error) {
 			}
 		case "last_handshake_time_sec":
 			if peer != nil {
-				sec, _ := strconv.ParseInt(val, 10, 64)
-				t := time.Unix(sec, 0)
-				peer.LastHandshake = t
+				// The protocol reports 0 for "never". Keep the zero Time in that
+				// case: callers must be able to tell "no handshake yet" apart from
+				// a real timestamp, and time.Unix(0,0) is 1970 — not the zero
+				// Time, so IsZero() would lie.
+				if sec, _ := strconv.ParseInt(val, 10, 64); sec != 0 {
+					peer.LastHandshake = time.Unix(sec, 0)
+				}
 			}
 		case "last_handshake_time_nsec":
 			if peer != nil {

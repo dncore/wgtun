@@ -353,7 +353,7 @@ func (i *inst) handshakeStale(st *uapi.DeviceStatus) bool {
 			continue
 		}
 		live := findLivePeer(st, p.PublicKey)
-		if live == nil || live.Endpoint == "" || live.LastHandshake.IsZero() {
+		if live == nil || live.Endpoint == "" || !handshaked(live.LastHandshake) {
 			continue
 		}
 		if live.LastHandshake.Before(cut) {
@@ -362,6 +362,12 @@ func (i *inst) handshakeStale(st *uapi.DeviceStatus) bool {
 	}
 	return false
 }
+
+// handshaked reports whether a last-handshake timestamp means a handshake
+// actually happened. wireguard-go reports 0 seconds for "never", which
+// time.Unix turns into 1970 — not the zero Time — so depending on parseGet
+// alone is too subtle a contract to rely on here.
+func handshaked(t time.Time) bool { return !t.IsZero() && t.Unix() > 0 }
 
 // isHostnameEndpoint reports whether an endpoint still needs DNS: a host:port
 // whose host is a name rather than a literal address.
