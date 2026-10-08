@@ -72,6 +72,9 @@ type inst struct {
 	// peerRetry counts consecutive endpoint fills for peers the device has not
 	// accepted yet, so a refused peer cannot be re-pushed forever
 	peerRetry map[string]int
+	// confSig is the config file revision this instance was parsed from, so an
+	// unchanged file is not re-read and re-parsed on every reconcile tick
+	confSig fileSig
 }
 
 func (i *inst) running() bool { return i.pid != 0 }
@@ -82,8 +85,37 @@ type Supervisor struct {
 	mu    sync.Mutex // guards insts and lifecycle serialization
 	insts map[string]*inst
 
+	// badConf remembers the revision of every unparseable config so a broken
+	// file is reported once per edit instead of once per tick.
+	badConf map[string]fileSig
+
 	st *state.Store
 	ev *logs.Store
+}
+
+// fileSig identifies a config file revision cheaply: enough to notice an edit
+// without reading and parsing every file on every tick. Size+mtime catch
+// normal edits; the inode catches a preserving overwrite (cp -p, mv).
+type fileSig struct {
+	size int64
+	mod  time.Time
+	ino  uint64
+}
+
+func (sig fileSig) same(other fileSig) bool {
+	return sig.size == other.size && sig.ino == other.ino && sig.mod.Equal(other.mod)
+}
+
+func statSig(path string) (fileSig, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fileSig{}, err
+	}
+	sig := fileSig{size: fi.Size(), mod: fi.ModTime()}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		sig.ino = st.Ino
+	}
+	return sig, nil
 }
 
 // New creates a supervisor.
@@ -112,6 +144,9 @@ func (s *Supervisor) loadConfigsLocked() error {
 	if err != nil {
 		return err // never clean up instances on a transient read failure
 	}
+	if s.badConf == nil {
+		s.badConf = map[string]fileSig{}
+	}
 	seen := map[string]bool{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".conf") {
@@ -120,17 +155,37 @@ func (s *Supervisor) loadConfigsLocked() error {
 		name := strings.TrimSuffix(e.Name(), ".conf")
 		seen[name] = true
 		path := filepath.Join(paths.ConfDir, e.Name())
-		conf, err := loadConfFile(path)
+		sig, err := statSig(path)
 		if err != nil {
-			s.ev.Error(name, "config invalid, skipped: %v", err)
-			if old, ok := s.insts[name]; ok {
-				old.lastErr = fmt.Sprintf("config invalid: %v", err)
-			}
-			continue
+			continue // gone between ReadDir and Stat; the next pass decides
 		}
 		cur, ok := s.insts[name]
+		if ok && cur.confSig.same(sig) {
+			// Unchanged revision: keep the parsed config and the derived key,
+			// which is what keeps an idle tick almost free.
+			continue
+		}
+		conf, err := loadConfFile(path)
+		if err != nil {
+			if !ok {
+				// A file we never managed: report a broken revision once, not
+				// once per tick (the event log is a rotating file).
+				if s.badConf[name] != sig {
+					s.ev.Error(name, "config invalid, skipped: %v", err)
+					s.badConf[name] = sig
+				}
+				continue
+			}
+			// Keep running on the last good config; report the new broken
+			// revision once (the sig marks it as seen).
+			cur.confSig = sig
+			cur.lastErr = fmt.Sprintf("config invalid: %v", err)
+			s.ev.Error(name, "config invalid, skipped: %v", err)
+			continue
+		}
+		delete(s.badConf, name)
 		if !ok {
-			s.insts[name] = &inst{name: name, confPath: path, conf: conf}
+			s.insts[name] = &inst{name: name, confPath: path, conf: conf, confSig: sig}
 			// First time this config is seen: treat it as something the user
 			// wants managed — enable boot autostart and desired-running so a
 			// migration from any previous setup hands over seamlessly.
@@ -140,8 +195,9 @@ func (s *Supervisor) loadConfigsLocked() error {
 			}
 			continue
 		}
-		cur.confPath, cur.conf = path, conf
+		cur.confPath, cur.conf, cur.confSig = path, conf, sig
 		cur.devicePub = "" // private key may have changed; re-derive lazily
+		cur.lastErr = ""
 	}
 	for name, i := range s.insts {
 		if !seen[name] {
@@ -150,6 +206,11 @@ func (s *Supervisor) loadConfigsLocked() error {
 			}
 			delete(s.insts, name)
 			s.ev.Info(name, "config removed, instance dropped")
+		}
+	}
+	for name := range s.badConf {
+		if !seen[name] {
+			delete(s.badConf, name)
 		}
 	}
 	return nil
@@ -202,20 +263,69 @@ func (s *Supervisor) BootInit(freshBoot bool) {
 	}
 }
 
+// probePlan is one instance's work for a reconcile pass: decided under the
+// lock, executed without it. The UAPI round trip and any DNS lookups block for
+// up to several seconds, and s.mu is what the TUI and the API need to stay
+// responsive, so neither may happen while holding it.
+type probePlan struct {
+	name     string
+	uapiPath string
+	jobs     []endpointJob // hostname endpoints worth re-resolving this pass
+}
+
+// endpointJob is one hostname endpoint that needs a fresh DNS answer.
+type endpointJob struct {
+	peerKey  string // base64 public key of the peer in the config
+	endpoint string // hostname:port as written in the config
+}
+
+// resolution is the outcome of resolving one endpointJob.
+type resolution struct {
+	candidates []string
+	err        error
+}
+
+// probeResult is what the I/O phase of one plan learned.
+type probeResult struct {
+	plan     probePlan
+	status   *uapi.DeviceStatus
+	getErr   error
+	resolved map[string]resolution // by peer key
+}
+
 // Reconcile drives actual state toward desired state and refreshes cached
 // statuses. It is the periodic heartbeat and the only place that restarts.
+//
+// It runs in three phases: decide under the lock, do the blocking I/O (UAPI
+// probe, DNS) without it, then apply the results under the lock again. Every
+// phase re-validates what it touches, since the world can change in between.
 func (s *Supervisor) Reconcile() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	// pick up config files added/removed on disk behind our back
-	if err := s.loadConfigsLocked(); err != nil {
-		s.ev.Warn("", "config rescan failed: %v", err)
+	confErr := s.loadConfigsLocked() // pick up config files changed on disk
+	plans := s.planLocked()
+	s.mu.Unlock()
+
+	if confErr != nil {
+		s.ev.Warn("", "config rescan failed: %v", confErr)
 	}
+
+	results := runProbes(plans)
+
+	s.mu.Lock()
+	s.finishLocked(results)
+	s.mu.Unlock()
+}
+
+// planLocked handles the lifecycle transitions that are due and returns the
+// probes to run. Callers hold s.mu.
+func (s *Supervisor) planLocked() []probePlan {
 	names := make([]string, 0, len(s.insts))
 	for n := range s.insts {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+
+	var plans []probePlan
 	for _, name := range names {
 		i := s.insts[name]
 		st := s.st.Get(name)
@@ -225,43 +335,69 @@ func (s *Supervisor) Reconcile() {
 		case !st.DesiredRun && i.running():
 			s.stopLocked(i, "desired stopped")
 		case i.running():
-			s.probeLocked(i)
+			plans = append(plans, probePlan{
+				name:     i.name,
+				uapiPath: i.uapiPath(),
+				jobs:     endpointJobs(i),
+			})
 		}
 	}
+	return plans
 }
 
-// probeLocked checks liveness and caches status. A wedged backend (dead pid
-// or unresponsive UAPI) triggers a full cleanup + restart with backoff.
-func (s *Supervisor) probeLocked(i *inst) {
-	alive := pidAlive(i.pid)
-	if !alive {
-		// stale recorded pid (e.g. after daemon adoption) — re-check the
-		// socket holder before declaring the instance dead
-		if p := socketPid(i.uapiPath()); p > 0 {
-			i.pid = p
-			alive = true
+// runProbes performs the blocking work: one UAPI round trip per instance plus
+// one DNS resolution per endpoint that is due. Called WITHOUT s.mu held.
+func runProbes(plans []probePlan) []probeResult {
+	out := make([]probeResult, 0, len(plans))
+	for _, p := range plans {
+		res := probeResult{plan: p}
+		st, err := uapi.Get(p.uapiPath)
+		res.status, res.getErr = st, err
+		// A device that does not answer has nothing useful to compare against,
+		// so do not spend lookups on it.
+		if err == nil && len(p.jobs) > 0 {
+			res.resolved = make(map[string]resolution, len(p.jobs))
+			for _, job := range p.jobs {
+				cands, rerr := resolveEndpointAll(job.endpoint)
+				res.resolved[job.peerKey] = resolution{candidates: cands, err: rerr}
+			}
 		}
+		out = append(out, res)
 	}
-	var st *uapi.DeviceStatus
-	var err error
-	if alive {
-		st, err = uapi.Get(i.uapiPath())
+	return out
+}
+
+// finishLocked applies probe results: caches the fresh status, retires unhealthy
+// instances with backoff, and pushes whatever the DNS answers imply. Callers
+// hold s.mu.
+func (s *Supervisor) finishLocked(results []probeResult) {
+	for _, r := range results {
+		i, ok := s.insts[r.plan.name]
+		if !ok || i.uapiPath() != r.plan.uapiPath {
+			continue // removed, or restarted on another tun while we probed
+		}
+		if r.getErr == nil {
+			if !pidAlive(i.pid) {
+				// Bookkeeping only: the device answered, so refresh the recorded
+				// pid when it is the exited launcher wireguard-go forks off.
+				if p := socketPid(i.uapiPath()); p > 0 {
+					i.pid = p
+				}
+			}
+			i.status, i.statusAt = r.status, time.Now()
+			i.failStreak = 0
+			s.applyEndpointsLocked(i, r.status, r.plan.jobs, r.resolved)
+			continue
+		}
+		i.failStreak++
+		reason := "process dead"
+		if pidAlive(i.pid) {
+			reason = fmt.Sprintf("uapi unresponsive: %v", r.getErr)
+		}
+		s.ev.Error(i.name, "instance unhealthy (%s), cleaning up for restart", reason)
+		s.cleanupLocked(i)
+		s.tryStartLocked(i)
 	}
-	if alive && err == nil {
-		i.status, i.statusAt = st, time.Now()
-		i.failStreak = 0
-		s.maybeFillEndpointsLocked(i, st)
-		s.maybeRefreshEndpointsLocked(i, st)
-		return
-	}
-	i.failStreak++
-	reason := "process dead"
-	if alive {
-		reason = fmt.Sprintf("uapi unresponsive: %v", err)
-	}
-	s.ev.Error(i.name, "instance unhealthy (%s), cleaning up for restart", reason)
-	s.cleanupLocked(i)
-	s.tryStartLocked(i)
 }
 
 // peerFillGiveUp is how many consecutive surgical pushes one peer gets before
@@ -271,59 +407,117 @@ func (s *Supervisor) probeLocked(i *inst) {
 // cap the 5s reconcile tick would re-push it forever.
 const peerFillGiveUp = 6
 
-// maybeFillEndpointsLocked gives endpoints to peers whose live endpoint is
-// missing: the "came up before the network did" self-heal.
+// endpointJobs lists the hostname endpoints that need a fresh DNS answer this
+// pass: every one whose live endpoint is missing (the "came up before the
+// network did" self-heal, retried each tick) plus, when the periodic gate
+// allows, every other hostname endpoint. Read-only: it runs under the lock but
+// performs no I/O, so the blocking lookups happen in runProbes instead.
 //
-// It never sends replace_peers. A peer that exists without an endpoint only
-// needs the endpoint; one the device refused needs its whole peer block. Both
-// are single-peer UAPI writes, so retrying while DNS is still down cannot reset
-// the sessions of the healthy peers (this used to re-push the entire config,
-// replace_peers and all, every 5 seconds until the resolver answered).
-func (s *Supervisor) maybeFillEndpointsLocked(i *inst, st *uapi.DeviceStatus) {
+// A device whose status was never read yet yields no jobs: the config was just
+// pushed with a fresh resolution at start or adoption, and the next pass has a
+// status to compare against.
+func endpointJobs(i *inst) []endpointJob {
+	if i.status == nil {
+		return nil
+	}
+	due := i.endpointCheckDue(i.status)
+	var jobs []endpointJob
 	for _, p := range i.conf.Peers {
-		if p.Endpoint == "" {
+		if !isHostnameEndpoint(p.Endpoint) {
 			continue
 		}
-		live := findLivePeer(st, p.PublicKey)
-		if live != nil && live.Endpoint != "" {
-			delete(i.peerRetry, p.PublicKey) // healthy: forget any backoff
+		live := findLivePeer(i.status, p.PublicKey)
+		if live != nil && live.Endpoint != "" && !due {
 			continue
 		}
-		if i.peerRetry[p.PublicKey] >= peerFillGiveUp {
-			continue // already reported; a config change or restart retries
+		jobs = append(jobs, endpointJob{peerKey: p.PublicKey, endpoint: p.Endpoint})
+	}
+	return jobs
+}
+
+// applyEndpointsLocked pushes whatever the pre-computed DNS answers imply: a
+// retargeted endpoint when the answer moved, or a peer's whole block when the
+// device never got one. It never sends replace_peers, so an instance's healthy
+// peers keep their sessions while another peer is being fixed.
+func (s *Supervisor) applyEndpointsLocked(i *inst, st *uapi.DeviceStatus, jobs []endpointJob, res map[string]resolution) {
+	if len(jobs) == 0 {
+		return
+	}
+	i.lastEPCheck = time.Now()
+	for _, job := range jobs {
+		r, ok := res[job.peerKey]
+		if !ok {
+			continue
 		}
-		resolved, err := resolveEndpoint(p.Endpoint)
-		if err != nil {
+		if r.err != nil {
 			// Usually DNS not being up yet right after boot: keep asking, this
 			// clears itself as soon as the resolver answers.
-			s.ev.Warn(i.name, "endpoint %s unresolved (will retry): %v", p.Endpoint, err)
+			s.ev.Warn(i.name, "endpoint %s unresolved (will retry): %v", job.endpoint, r.err)
 			continue
 		}
+		live := findLivePeer(st, job.peerKey)
+
+		if live != nil && live.Endpoint != "" {
+			// A round-robin record answers in a different order on every lookup;
+			// flipping between equivalent addresses is churn, not progress, so
+			// any candidate matching what the device already uses counts as
+			// unchanged.
+			if containsString(r.candidates, live.Endpoint) {
+				delete(i.peerRetry, job.peerKey) // healthy: forget any backoff
+				continue
+			}
+			if err := uapi.SetPeerEndpoint(i.uapiPath(), job.peerKey, r.candidates[0]); err != nil {
+				s.ev.Warn(i.name, "endpoint %s -> %s push failed: %v", live.Endpoint, r.candidates[0], err)
+				continue
+			}
+			s.ev.Info(i.name, "endpoint %s -> %s (%s changed), re-pushed", live.Endpoint, r.candidates[0], job.endpoint)
+			continue
+		}
+
+		// The device has no usable endpoint for this peer.
+		if i.peerRetry[job.peerKey] >= peerFillGiveUp {
+			continue // already reported; a config change or restart retries
+		}
+		var err error
 		if live == nil {
-			// The device has no such peer, so its allowed IPs are missing too:
-			// only a full peer block can fix that.
+			// No such peer at all, so its allowed IPs are missing too: only a
+			// full peer block can fix that.
+			p := findConfPeer(i.conf, job.peerKey)
+			if p == nil {
+				continue // config edited while we were resolving; next pass handles it
+			}
 			err = uapi.UpsertPeer(i.uapiPath(), uapi.SetPeer{
 				PublicKey:           p.PublicKey,
 				PresharedKey:        p.PresharedKey,
-				Endpoint:            resolved,
+				Endpoint:            r.candidates[0],
 				AllowedIPs:          prefixesToStrings(p.AllowedIPs),
 				PersistentKeepalive: p.PersistentKeepalive,
 			})
 		} else {
-			err = uapi.SetPeerEndpoint(i.uapiPath(), p.PublicKey, resolved)
+			err = uapi.SetPeerEndpoint(i.uapiPath(), job.peerKey, r.candidates[0])
 		}
 		if err != nil {
-			s.ev.Warn(i.name, "endpoint push for %s failed: %v", p.Endpoint, err)
+			s.ev.Warn(i.name, "endpoint push for %s failed: %v", job.endpoint, err)
 			continue
 		}
 		if live == nil {
-			if i.bumpPeerRetry(p.PublicKey) == peerFillGiveUp {
-				s.ev.Error(i.name, "peer %s still absent from the device after %d pushes, giving up; wireguard-go silently drops a peer whose public key equals this instance's own", abbrevKey(p.PublicKey), peerFillGiveUp)
+			if i.bumpPeerRetry(job.peerKey) == peerFillGiveUp {
+				s.ev.Error(i.name, "peer %s still absent from the device after %d pushes, giving up; wireguard-go silently drops a peer whose public key equals this instance's own", abbrevKey(job.peerKey), peerFillGiveUp)
 			}
 			continue
 		}
-		s.ev.Info(i.name, "endpoint %s resolved and pushed", resolved)
+		s.ev.Info(i.name, "endpoint %s resolved and pushed", r.candidates[0])
 	}
+}
+
+// findConfPeer returns the configured peer with the given public key.
+func findConfPeer(conf *wgconf.Config, pubB64 string) *wgconf.Peer {
+	for idx := range conf.Peers {
+		if conf.Peers[idx].PublicKey == pubB64 {
+			return &conf.Peers[idx]
+		}
+	}
+	return nil
 }
 
 // bumpPeerRetry counts one more rejected endpoint fill for a peer key.
@@ -342,48 +536,6 @@ func abbrevKey(k string) string {
 		return k
 	}
 	return k[:12] + "..."
-}
-
-// maybeRefreshEndpointsLocked re-resolves hostname peer endpoints and
-// retargets the peer when the DNS answer moved. It is the periodic follow-up
-// to maybeFillEndpointsLocked: that one covers "DNS was not ready yet" at
-// start, this one covers "DNS now says something else" — the DDNS case, where
-// the name is re-bound to a new address long after the tunnel came up.
-//
-// Only hostname endpoints are touched (a literal ip:port is authoritative)
-// and only the endpoint field is written, so an existing session survives
-// whenever the address did not actually change.
-func (s *Supervisor) maybeRefreshEndpointsLocked(i *inst, st *uapi.DeviceStatus) {
-	if !i.endpointCheckDue(st) {
-		return
-	}
-	i.lastEPCheck = time.Now()
-	for _, p := range i.conf.Peers {
-		if !isHostnameEndpoint(p.Endpoint) {
-			continue
-		}
-		live := findLivePeer(st, p.PublicKey)
-		if live == nil || live.Endpoint == "" {
-			// never pushed (or still empty): that is maybeFillEndpointsLocked's job
-			continue
-		}
-		candidates, err := resolveEndpointAll(p.Endpoint)
-		if err != nil {
-			s.ev.Warn(i.name, "endpoint %s unresolved (will retry): %v", p.Endpoint, err)
-			continue
-		}
-		// A round-robin record answers in a different order on every lookup;
-		// flipping between equivalent addresses is churn, not progress, so any
-		// candidate matching what the device already uses counts as unchanged.
-		if containsString(candidates, live.Endpoint) {
-			continue
-		}
-		if err := uapi.SetPeerEndpoint(i.uapiPath(), p.PublicKey, candidates[0]); err != nil {
-			s.ev.Warn(i.name, "endpoint re-resolve push failed: %v", err)
-			continue
-		}
-		s.ev.Info(i.name, "endpoint %s -> %s (%s changed), re-pushed", live.Endpoint, candidates[0], p.Endpoint)
-	}
 }
 
 // endpointCheckDue rate-limits DNS re-validation to the periodic interval,
@@ -450,6 +602,9 @@ func containsString(ss []string, want string) bool {
 }
 
 func findLivePeer(st *uapi.DeviceStatus, pubB64 string) *uapi.PeerStatus {
+	if st == nil {
+		return nil
+	}
 	for idx := range st.Peers {
 		if st.Peers[idx].PublicKey == pubB64 {
 			return &st.Peers[idx]

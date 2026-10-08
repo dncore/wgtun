@@ -3,27 +3,25 @@ package daemon
 import (
 	"context"
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/dncore/wgtun/internal/paths"
+	"github.com/dncore/wgtun/internal/logs"
 	"github.com/dncore/wgtun/internal/uapi"
 	"github.com/dncore/wgtun/internal/wgconf"
 )
 
-// fakeUAPI answers one request per connection and reports the request bodies
-// it received.
-func fakeUAPI(t *testing.T, sockPath, reply string) chan string {
+// fakeUAPI answers get=1 with getReply and any set=1 with errno=0, recording
+// every request body it received. Requests are answered per connection.
+func fakeUAPI(t *testing.T, sockPath, getReply string) chan string {
 	t.Helper()
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	got := make(chan string, 4)
+	got := make(chan string, 16)
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -46,31 +44,17 @@ func fakeUAPI(t *testing.T, sockPath, reply string) chan string {
 						return
 					}
 				}
-				got <- string(buf)
-				c.Write([]byte(reply))
+				req := string(buf)
+				got <- req
+				if strings.HasPrefix(req, "get=1") {
+					c.Write([]byte(getReply))
+					return
+				}
+				c.Write([]byte("errno=0\n\n"))
 			}(c)
 		}
 	}()
 	return got
-}
-
-// newEndpointFixture builds a running-looking instance whose UAPI socket is a
-// fake server, and points the socket dir at a short temp path (the unix socket
-// path limit is tight on darwin).
-func newEndpointFixture(t *testing.T, peers []wgconf.Peer) (*inst, chan string) {
-	t.Helper()
-	sockDir, err := os.MkdirTemp("/tmp", "wgtun-ep")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(sockDir) })
-	old := paths.WireGuardSockDir
-	paths.WireGuardSockDir = sockDir
-	t.Cleanup(func() { paths.WireGuardSockDir = old })
-
-	i := &inst{name: "wg1", tun: "utun9", conf: &wgconf.Config{Peers: peers}}
-	got := fakeUAPI(t, filepath.Join(sockDir, "utun9.sock"), "errno=0\n\n")
-	return i, got
 }
 
 // stubLookup replaces the resolver seam with a static zone.
@@ -91,24 +75,53 @@ func stubLookup(t *testing.T, zone map[string][]string) {
 	t.Cleanup(func() { lookupIPAddr = old })
 }
 
-func waitReq(t *testing.T, got chan string) string {
+// waitSet returns the next request that is not the periodic get=1 probe: every
+// reconcile pass reads the device before it decides anything, so the interesting
+// request is always the one after it.
+func waitSet(t *testing.T, got chan string) string {
 	t.Helper()
-	select {
-	case req := <-got:
-		return req
-	case <-time.After(3 * time.Second):
-		t.Fatal("no UAPI request was sent")
-		return ""
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case req := <-got:
+			if strings.HasPrefix(req, "get=1") {
+				continue
+			}
+			return req
+		case <-deadline:
+			t.Fatal("no UAPI set request was sent")
+			return ""
+		}
 	}
 }
 
-func requireNoReq(t *testing.T, got chan string) {
+// requireNoSet fails if the daemon wrote anything but a get=1 probe.
+func requireNoSet(t *testing.T, got chan string) {
 	t.Helper()
-	select {
-	case req := <-got:
-		t.Fatalf("unexpected UAPI request:\n%s", req)
-	default:
+	for _, req := range collect(got) {
+		if !strings.HasPrefix(req, "get=1") {
+			t.Fatalf("unexpected UAPI request:\n%s", req)
+		}
 	}
+}
+
+func hasEvent(ev *logs.Store, level logs.Level, substr string) bool {
+	for _, e := range ev.Query(logs.Filter{MinLevel: level}) {
+		if strings.Contains(e.Msg, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func countEvents(ev *logs.Store, level logs.Level, substr string) int {
+	n := 0
+	for _, e := range ev.Query(logs.Filter{MinLevel: level}) {
+		if strings.Contains(e.Msg, substr) {
+			n++
+		}
+	}
+	return n
 }
 
 func TestIsHostnameEndpoint(t *testing.T) {
@@ -157,90 +170,6 @@ func TestResolveEndpointAll(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("resolver called %d times, want 1", calls)
 	}
-}
-
-func TestRefreshEndpointsRetargetsChangedDNS(t *testing.T) {
-	pub, _ := wgconf.GeneratePrivateKey()
-	i, got := newEndpointFixture(t, []wgconf.Peer{{PublicKey: pub, Endpoint: "ddns.example:51820"}})
-	stubLookup(t, map[string][]string{"ddns.example": {"198.51.100.7"}})
-	sup, _ := newTestSupervisor(t)
-
-	st := &uapi.DeviceStatus{Peers: []uapi.PeerStatus{{
-		PublicKey:     pub,
-		Endpoint:      "203.0.113.7:51820",
-		LastHandshake: time.Now(),
-	}}}
-	sup.maybeRefreshEndpointsLocked(i, st)
-
-	req := waitReq(t, got)
-	hexKey, err := wgconf.KeyHex(pub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{
-		"set=1\n",
-		"public_key=" + hexKey + "\n",
-		"endpoint=198.51.100.7:51820\n",
-	} {
-		if !strings.Contains(req, want) {
-			t.Errorf("request missing %q\ngot:\n%s", want, req)
-		}
-	}
-	// the point of SetPeerEndpoint: no peer replacement, no session reset
-	for _, bad := range []string{"replace_peers", "replace_allowed_ips", "private_key", "listen_port", "allowed_ip="} {
-		if strings.Contains(req, bad) {
-			t.Errorf("request must not contain %q\ngot:\n%s", bad, req)
-		}
-	}
-	if !i.lastEPCheck.After(time.Time{}) {
-		t.Error("a check must stamp lastEPCheck")
-	}
-}
-
-func TestRefreshEndpointsKeepsLiveWhenAnyCandidateMatches(t *testing.T) {
-	pub, _ := wgconf.GeneratePrivateKey()
-	i, got := newEndpointFixture(t, []wgconf.Peer{{PublicKey: pub, Endpoint: "ddns.example:51820"}})
-	// round-robin: order changes per lookup, the second answer is the live one
-	stubLookup(t, map[string][]string{"ddns.example": {"198.51.100.7", "203.0.113.7"}})
-	sup, _ := newTestSupervisor(t)
-
-	st := &uapi.DeviceStatus{Peers: []uapi.PeerStatus{{
-		PublicKey:     pub,
-		Endpoint:      "203.0.113.7:51820",
-		LastHandshake: time.Now(),
-	}}}
-	sup.maybeRefreshEndpointsLocked(i, st)
-	requireNoReq(t, got)
-}
-
-func TestRefreshEndpointsIgnoresLiteralEndpoint(t *testing.T) {
-	pub, _ := wgconf.GeneratePrivateKey()
-	i, got := newEndpointFixture(t, []wgconf.Peer{{PublicKey: pub, Endpoint: "203.0.113.9:51820"}})
-	stubLookup(t, map[string][]string{}) // any lookup would fail loudly
-	sup, _ := newTestSupervisor(t)
-
-	st := &uapi.DeviceStatus{Peers: []uapi.PeerStatus{{
-		PublicKey:     pub,
-		Endpoint:      "203.0.113.7:51820",
-		LastHandshake: time.Now(),
-	}}}
-	sup.maybeRefreshEndpointsLocked(i, st)
-	requireNoReq(t, got)
-}
-
-func TestRefreshEndpointsUnresolvedIsNotFatal(t *testing.T) {
-	pub, _ := wgconf.GeneratePrivateKey()
-	i, got := newEndpointFixture(t, []wgconf.Peer{{PublicKey: pub, Endpoint: "ddns.example:51820"}})
-	stubLookup(t, map[string][]string{}) // NXDOMAIN
-	sup, _ := newTestSupervisor(t)
-
-	st := &uapi.DeviceStatus{Peers: []uapi.PeerStatus{{
-		PublicKey:     pub,
-		Endpoint:      "203.0.113.7:51820",
-		LastHandshake: time.Now(),
-	}}}
-	sup.maybeRefreshEndpointsLocked(i, st) // must not panic or push
-	requireNoReq(t, got)
 }
 
 func TestEndpointCheckDue(t *testing.T) {

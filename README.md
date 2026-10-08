@@ -169,6 +169,13 @@ to install instead of failing silently at first tunnel start.
   (5 failed starts in 10 min → 5 min pause). Endpoints whose DNS was not
   ready at boot are re-resolved and pushed later, as one-peer UAPI writes:
   retrying cannot reset the sessions of the instance's healthy peers.
+- **The heartbeat stays out of the way.** A pass runs in three phases: decide
+  under the supervisor lock, do the blocking work (the UAPI round trip and any
+  DNS lookup) with the lock released, then apply the results under it again —
+  so a slow or dead resolver cannot stall the TUI or an API call. Unchanged
+  config files are not re-read or re-parsed either: size, mtime and inode are
+  compared first. `WGTUN_RECONCILE_INTERVAL` tunes the tick (default `5s`; keep
+  it well below the 15s endpoint fast lane, or that lane coarsens to the tick).
 - **Endpoint DNS is followed, not frozen.** An endpoint written as a hostname
   is re-resolved on a schedule and retargeted in place when the answer moves,
   so a DDNS name stays a live address instead of a value frozen at boot —

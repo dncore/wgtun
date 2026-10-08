@@ -92,7 +92,7 @@ func run() error {
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(reconcileInterval(ev))
 	defer ticker.Stop()
 	for {
 		select {
@@ -105,4 +105,27 @@ func run() error {
 			return nil
 		}
 	}
+}
+
+// reconcileInterval is how often the supervisor probes instances and picks up
+// config changes. An untouched config is no longer re-read and re-parsed each
+// tick, so the default tick is cheap; the knob exists for hosts running many
+// instances, where status freshness matters less than idle cost. It must stay
+// well below the 15s endpoint fast lane, or that lane silently degrades to the
+// tick granularity.
+func reconcileInterval(ev *logs.Store) time.Duration {
+	const def = 5 * time.Second
+	v := os.Getenv("WGTUN_RECONCILE_INTERVAL")
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < time.Second {
+		ev.Warn("", "ignoring WGTUN_RECONCILE_INTERVAL=%q: want a duration of at least 1s", v)
+		return def
+	}
+	if d > endpointFastRecheck {
+		ev.Warn("", "WGTUN_RECONCILE_INTERVAL=%s is above the %s fast-lane floor, so endpoint rechecks lose resolution", v, endpointFastRecheck)
+	}
+	return d
 }
