@@ -14,7 +14,6 @@ import (
 // the tunnels down with the daemon and the next daemon has nothing to adopt.
 func TestLaunchdPlistAbandonsProcessGroup(t *testing.T) {
 	plist := launchdPlist("/opt/homebrew/bin/wgtun")
-
 	for _, want := range []string{
 		"<key>AbandonProcessGroup</key>",
 		"<key>KeepAlive</key>",
@@ -40,6 +39,57 @@ func TestLaunchdPlistAbandonsProcessGroup(t *testing.T) {
 	if out, err := exec.Command("plutil", "-lint", path).CombinedOutput(); err != nil {
 		t.Fatalf("plutil -lint rejected the plist: %v: %s", err, strings.TrimSpace(string(out)))
 	}
+}
+
+// lintPlist writes a plist and asks plutil to validate it.
+func lintPlist(t *testing.T, plist string) {
+	t.Helper()
+	if _, err := exec.LookPath("plutil"); err != nil {
+		t.Skip("plutil not available")
+	}
+	path := filepath.Join(t.TempDir(), "com.wgtun.daemon.plist")
+	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("plutil", "-lint", path).CombinedOutput(); err != nil {
+		t.Fatalf("plutil -lint rejected the plist: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+}
+
+// `daemon --install` regenerates the plist from the template, so knobs set by
+// hand there would be silently dropped on the next install or upgrade: the ones
+// a user sets in the installing shell are baked in instead.
+func TestLaunchdPlistBakesEnvironment(t *testing.T) {
+	t.Setenv("WGTUN_RECONCILE_INTERVAL", "")
+	if p := launchdPlist("/opt/homebrew/bin/wgtun"); strings.Contains(p, "EnvironmentVariables") {
+		t.Errorf("nothing set, so the plist must not declare an environment:\n%s", p)
+	}
+
+	t.Setenv("WGTUN_RECONCILE_INTERVAL", "30s")
+	p := launchdPlist("/opt/homebrew/bin/wgtun")
+	for _, want := range []string{
+		"<key>EnvironmentVariables</key>",
+		"<key>WGTUN_RECONCILE_INTERVAL</key>",
+		"<string>30s</string>",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("plist missing %q:\n%s", want, p)
+		}
+	}
+	if pairs, _ := launchdEnv(); len(pairs) != 1 || pairs[0] != "WGTUN_RECONCILE_INTERVAL=30s" {
+		t.Errorf("launchdEnv = %v", pairs)
+	}
+	lintPlist(t, p)
+}
+
+// A value with XML metacharacters must not be able to break the plist.
+func TestLaunchdPlistEscapesEnvironment(t *testing.T) {
+	t.Setenv("WGTUN_RECONCILE_INTERVAL", "a&b<c")
+	p := launchdPlist("/opt/homebrew/bin/wgtun")
+	if !strings.Contains(p, "<string>a&amp;b&lt;c</string>") {
+		t.Errorf("value not escaped:\n%s", p)
+	}
+	lintPlist(t, p)
 }
 
 func TestReadPidFile(t *testing.T) {

@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"encoding/xml"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,6 +56,9 @@ func InstallLaunchd() error {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 	fmt.Printf("installed and started %s (%s daemon)\n", launchdLabel, exe)
+	if pairs, _ := launchdEnv(); len(pairs) > 0 {
+		fmt.Printf("environment: %s\n", strings.Join(pairs, " "))
+	}
 	return nil
 }
 
@@ -140,6 +145,43 @@ func isWireGuardGo(pid int) bool {
 	return comm == paths.WireGuardGo || strings.Contains(filepath.Base(comm), "wireguard-go")
 }
 
+// launchdEnvKeys are the environment variables baked into the plist when they
+// are set while installing. `daemon --install` regenerates the plist from this
+// template, so anything set by hand there would be silently dropped on the next
+// install or upgrade.
+var launchdEnvKeys = []string{
+	"WGTUN_RECONCILE_INTERVAL",
+}
+
+// launchdEnv returns the KEY=VALUE pairs to bake into the plist, in a stable
+// order, and the XML fragment declaring them (empty when nothing is set).
+func launchdEnv() ([]string, string) {
+	var pairs []string
+	var frag strings.Builder
+	for _, k := range launchdEnvKeys {
+		v := os.Getenv(k)
+		if v == "" {
+			continue
+		}
+		pairs = append(pairs, k+"="+v)
+		frag.WriteString("\t\t<key>")
+		xmlEscape(&frag, k)
+		frag.WriteString("</key>\n\t\t<string>")
+		xmlEscape(&frag, v)
+		frag.WriteString("</string>\n")
+	}
+	if len(pairs) == 0 {
+		return nil, ""
+	}
+	return pairs, "\t<key>EnvironmentVariables</key>\n\t<dict>\n" + frag.String() + "\t</dict>\n"
+}
+
+// xmlEscape writes s with XML metacharacters escaped (config values are simple
+// duration strings, but the plist must stay valid whatever they contain).
+func xmlEscape(w io.Writer, s string) {
+	_ = xml.EscapeText(w, []byte(s))
+}
+
 // launchdPlist renders the LaunchDaemon.
 //
 // AbandonProcessGroup is deliberate: wireguard-go runs in the daemon's process
@@ -148,6 +190,7 @@ func isWireGuardGo(pid int) bool {
 // which is exactly what crash adoption exists to prevent. The price is that
 // UninstallLaunchd must reap the tunnels itself.
 func launchdPlist(exe string) string {
+	_, env := launchdEnv()
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -165,13 +208,13 @@ func launchdPlist(exe string) string {
 	<true/>
 	<key>AbandonProcessGroup</key>
 	<true/>
-	<key>StandardOutPath</key>
+%s	<key>StandardOutPath</key>
 	<string>%s</string>
 	<key>StandardErrorPath</key>
 	<string>%s</string>
 </dict>
 </plist>
-`, launchdLabel, exe, filepath.Join(paths.LogDir, "daemon.out.log"), filepath.Join(paths.LogDir, "daemon.err.log"))
+`, launchdLabel, exe, env, filepath.Join(paths.LogDir, "daemon.out.log"), filepath.Join(paths.LogDir, "daemon.err.log"))
 }
 
 // launchctl runs launchctl, folding its output into the error so failures read

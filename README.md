@@ -176,6 +176,9 @@ to install instead of failing silently at first tunnel start.
   config files are not re-read or re-parsed either: size, mtime and inode are
   compared first. `WGTUN_RECONCILE_INTERVAL` tunes the tick (default `5s`; keep
   it well below the 15s endpoint fast lane, or that lane coarsens to the tick).
+  Set it for the daemon with `sudo env WGTUN_RECONCILE_INTERVAL=30s wgtun daemon
+  --install`, which bakes it into the plist — `--install` regenerates that plist
+  from its template, so a value edited in by hand would not survive.
 - **Endpoint DNS is followed, not frozen.** An endpoint written as a hostname
   is re-resolved on a schedule and retargeted in place when the answer moves,
   so a DDNS name stays a live address instead of a value frozen at boot —

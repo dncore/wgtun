@@ -165,7 +165,10 @@ daemon 启动时会检测 `wireguard-go`（路径与版本显示在设置页）�
   往返与所有 DNS 查询）→ 再上锁落地结果。因此解析器卡住不会拖住 TUI 或任何
   API 调用。未改动的配置文件也不会被重读重解析：先比对 size/mtime/inode。
   心跳间隔可用 `WGTUN_RECONCILE_INTERVAL` 调（默认 `5s`；请保持远小于 15s
-  的端点快通道下限，否则那条车道会被量化到心跳粒度）。
+  的端点快通道下限，否则那条车道会被量化到心跳粒度）。设置方式是
+  `sudo env WGTUN_RECONCILE_INTERVAL=30s wgtun daemon --install` —— 它会写进
+  plist；由于 `--install` 是按模板重新生成 plist，手工改进去的值活不过下一次
+  安装/升级。
 - **端点 DNS 会被持续跟随，而不是一次写死。** 写成域名的端点会被定时重解析，
   一旦解析结果变化就**就地**改写该 peer 的 endpoint，让 DDNS 域名始终是一个
   活地址，而不是开机时冻结下来的快照 —— 详见下节「端点域名跟随（DDNS）」。
