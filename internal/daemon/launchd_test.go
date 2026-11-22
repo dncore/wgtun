@@ -1,3 +1,5 @@
+//go:build darwin
+
 package daemon
 
 import (
@@ -13,6 +15,7 @@ import (
 // runs inside it, so without this key every bootout / KeepAlive restart takes
 // the tunnels down with the daemon and the next daemon has nothing to adopt.
 func TestLaunchdPlistAbandonsProcessGroup(t *testing.T) {
+	isolateStateDir(t)
 	plist := launchdPlist("/opt/homebrew/bin/wgtun")
 	for _, want := range []string{
 		"<key>AbandonProcessGroup</key>",
@@ -60,6 +63,7 @@ func lintPlist(t *testing.T, plist string) {
 // hand there would be silently dropped on the next install or upgrade: the ones
 // a user sets in the installing shell are baked in instead.
 func TestLaunchdPlistBakesEnvironment(t *testing.T) {
+	isolateStateDir(t)
 	t.Setenv("WGTUN_RECONCILE_INTERVAL", "")
 	if p := launchdPlist("/opt/homebrew/bin/wgtun"); strings.Contains(p, "EnvironmentVariables") {
 		t.Errorf("nothing set, so the plist must not declare an environment:\n%s", p)
@@ -84,6 +88,7 @@ func TestLaunchdPlistBakesEnvironment(t *testing.T) {
 
 // A value with XML metacharacters must not be able to break the plist.
 func TestLaunchdPlistEscapesEnvironment(t *testing.T) {
+	isolateStateDir(t)
 	t.Setenv("WGTUN_RECONCILE_INTERVAL", "a&b<c")
 	p := launchdPlist("/opt/homebrew/bin/wgtun")
 	if !strings.Contains(p, "<string>a&amp;b&lt;c</string>") {

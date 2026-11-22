@@ -8,13 +8,13 @@ import (
 
 // Color palette (works in dark terminals).
 var (
-	colPrimary   = lipgloss.Color("#7c9fff") // soft blue
-	colGreen     = lipgloss.Color("#3fb950")
-	colYellow    = lipgloss.Color("#d29922")
-	colRed       = lipgloss.Color("#f85149")
-	colMuted     = lipgloss.Color("#8b949e")
-	colWhite = lipgloss.Color("#e6edf3")
-	colDim   = lipgloss.Color("#484f58")
+	colPrimary = lipgloss.Color("#7c9fff") // soft blue
+	colGreen   = lipgloss.Color("#3fb950")
+	colYellow  = lipgloss.Color("#d29922")
+	colRed     = lipgloss.Color("#f85149")
+	colMuted   = lipgloss.Color("#8b949e")
+	colWhite   = lipgloss.Color("#e6edf3")
+	colDim     = lipgloss.Color("#484f58")
 )
 
 // Base style: inherits the terminal's own colors (no background fill —
@@ -23,14 +23,15 @@ var (
 var base = lipgloss.NewStyle().Padding(0, 1)
 
 var (
-	titleStyle = lipgloss.NewStyle().Foreground(colPrimary).Bold(true).MarginBottom(1)
-	subtle     = lipgloss.NewStyle().Foreground(colMuted)
-	statusBar  = lipgloss.NewStyle().Foreground(colWhite).Padding(0, 1)
-	tabActive  = lipgloss.NewStyle().Foreground(colPrimary).Bold(true).Underline(true).Padding(0, 1)
-	tabInactive = lipgloss.NewStyle().Foreground(colMuted).Padding(0, 1)
-	footerKey  = lipgloss.NewStyle().Foreground(colPrimary)
-	footerDesc = lipgloss.NewStyle().Foreground(colMuted)
-	statusText = lipgloss.NewStyle().Foreground(colMuted)
+	titleStyle    = lipgloss.NewStyle().Foreground(colPrimary).Bold(true).MarginBottom(1)
+	subtle        = lipgloss.NewStyle().Foreground(colMuted)
+	statusBar     = lipgloss.NewStyle().Foreground(colWhite).Padding(0, 1)
+	tabActive     = lipgloss.NewStyle().Foreground(colPrimary).Bold(true).Underline(true).Padding(0, 1)
+	tabInactive   = lipgloss.NewStyle().Foreground(colMuted).Padding(0, 1)
+	footerKey     = lipgloss.NewStyle().Foreground(colPrimary)
+	footerDesc    = lipgloss.NewStyle().Foreground(colMuted)
+	statusText    = lipgloss.NewStyle().Foreground(colMuted)
+	offlineBanner = lipgloss.NewStyle().Foreground(colRed).Bold(true).Padding(0, 1)
 )
 
 // handshakeAgeToColor colors a handshake age:

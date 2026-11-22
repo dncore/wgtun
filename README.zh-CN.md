@@ -5,21 +5,23 @@
 [![Release](https://img.shields.io/github/v/release/dncore/wgtun)](https://github.com/dncore/wgtun/releases)
 [![License](https://img.shields.io/github/license/dncore/wgtun)](LICENSE)
 
-macOS 上的 WireGuard 编排器 —— 一个终端 UI 加一个 root launchd 常驻进程，
-替你管理任意数量的 `wireguard-go` 实例。不再有 `wg-quick` 脚本、不再有
-每接口一份的 launchd plist、不需要内核扩展。
+macOS / Linux 上的 WireGuard 编排器 —— 一个终端 UI 加一个 root 常驻进程
+（launchd / systemd），替你管理任意数量的 WireGuard 实例：Linux 优先用
+**内核态 WireGuard**，macOS 与内核模块不可用的 Linux 用 `wireguard-go`。
+不再有 `wg-quick` 脚本、不再有每接口一份的服务定义。
 
 ```
 wgtun                 打开终端 UI
-wgtun daemon          运行特权守护进程（由 launchd 拉起）
+wgtun daemon          运行特权守护进程（由 launchd / systemd 拉起）
 ```
 
 ## 为什么做这个
 
-macOS 没有内核态 WireGuard，所有人都在跑用户态的 `wireguard-go`。用原
-生工具管理多条隧道意味着手写 shell 脚本、每个接口一份 launchd 任务，以
-及一堆会以各种方式腐烂的共享运行时文件（残留锁、僵尸后端、重启时
-`already exists` 死锁）。
+macOS 没有内核态 WireGuard，所有人都在跑用户态的 `wireguard-go`。Linux
+有内核态，但编排问题是同一个：`wg-quick` 每个接口一份 unit、端点只在启
+动时解析一次，也没有监督器来收养或修复卡死的设备。用原生工具管理多条隧
+道意味着手写 shell 脚本、每个接口一份服务定义，以及一堆会以各种方式腐
+烂的共享运行时文件（残留锁、僵尸后端、重启时 `already exists` 死锁）。
 
 wgtun 用两个部件取代这一切：
 
@@ -31,10 +33,11 @@ wgtun 用两个部件取代这一切：
 | | wg-quick + 脚本 | wgtun |
 |---|---|---|
 | 多隧道 | 每条一个脚本 | 任意数量，单一监督器 |
-| 开机自启 | 每个接口一份 plist | 每个实例一个开关 |
+| 开机自启 | 每个接口一份服务定义 | 每个实例一个开关 |
 | 崩溃恢复 | 通常没有 | 收养 + 自愈 + 退避 |
-| 端点域名 | 开机解析一次，之后永久过期 | 定时重解析并就地改写（DDNS） |
-| 实时状态 | 解析 `wg show` 文本 | 原生 UAPI，结构化数据 |
+| 端点域名 | 开机解析一次，之后永久过期 | 定时重解析，**仅在链路不健康时**就地改写（DDNS，防抖） |
+| Linux 实现 | 内核态或手动 userspace | 内核优先，自动回退 wireguard-go |
+| 实时状态 | 解析 `wg show` 文本 | 原生 UAPI / netlink，结构化数据 |
 | 编辑配置 | 手工编辑文件 | TUI 编辑器 + 冲突检测 |
 | 日志 | 无时间戳的 stderr 转储 | 结构化事件，回放 + 实时跟随 |
 
@@ -64,7 +67,7 @@ wgtun 用两个部件取代这一切：
  │ rx 48.2KB/s                          │ │ rx 0B/s                              │
  ╰──────────────────────────────────────╯ ╰──────────────────────────────────────╯
 
-    r refresh   ctrl+q quit
+    r refresh   R repair daemon   ctrl+q quit
 ```
 
 **实例（Instances）** —— 表格展示自启标志、状态、监听端口、peer 数量；
@@ -106,12 +109,37 @@ wgtun 用两个部件取代这一切：
 ```bash
 brew trust dncore/tap           # 一次性：Homebrew 要求显式信任第三方 tap
 brew install dncore/tap/wgtun   # 依赖 wireguard-go，自动安装
-sudo wgtun daemon --install     # 安装并启动 launchd 守护进程
+sudo wgtun daemon --install     # 安装并启动守护进程（launchd）
 wgtun                           # 打开 TUI
 ```
 
-配置位于 `/usr/local/etc/wireguard/*.conf`（wg-quick 兼容格式）。
-首次启动自动导入已有文件，无需迁移。
+配置位于 `/usr/local/etc/wireguard/*.conf`（macOS）或
+`/etc/wireguard/*.conf`（Linux），wg-quick 兼容格式。首次启动自动导入
+已有文件，无需迁移。
+
+### Linux
+
+```bash
+# 发行版仓库或上游安装 wireguard-go（仅内核模块不可用时的回退）
+sudo apt install wireguard-go        # Debian/Ubuntu；其他发行版用各自包管理器或源码
+
+sudo wgtun daemon --install          # 写 /etc/systemd/system/wgtun.service 并启动
+wgtun                                # 打开 TUI
+wgtun status                         # 无 TUI 时查看 daemon 健康与端点 DNS
+```
+
+`--install` 会把 `WGTUN_RECONCILE_INTERVAL`、`WGTUN_ENDPOINT_RESOLVER`、
+`WGTUN_BACKEND` 和调用者的主组（`WGTUN_SOCKET_GROUP`，让普通用户能连
+socket）固化进 unit。内核模块可用时默认走内核态；想强制某一种：
+
+```bash
+sudo env WGTUN_BACKEND=kernel    wgtun daemon --install
+sudo env WGTUN_BACKEND=userspace wgtun daemon --install
+```
+
+从 `wg-quick@` 迁移时，先 `sudo systemctl disable --now wg-quick@wg0`，
+否则同一个 `wg0` 会被两边同时管理。wgtun 的 Linux 接口名固定为
+`wgtun-<实例名>`（超长时截断加哈希），不会与 `wg0` 冲突。
 
 ## 导入现有配置
 
@@ -133,30 +161,35 @@ daemon 启动时会检测 `wireguard-go`（路径与版本显示在设置页）�
 ## 架构
 
 ```
-             你的用户（无需 sudo）                        root（launchd）
+             你的用户（无需 sudo）                   root（launchd / systemd）
 
  ┌─────────────────────────────┐            ┌─────────────────────────────────────┐
  │  wgtun — 终端 UI            │            │  wgtun daemon — com.wgtun.daemon    │
- │                             │  HTTP      │                                     │
+ │                             │  HTTP      │                    / wgtun.service  │
  │  Dashboard  Instances       │◄─经 unix───►│  监督器 / 收敛循环（每 5 秒）        │
- │  Editor     Logs  Settings  │  socket    │    ├── wireguard-go → utun0         │
- │                             │ /var/run/  │    ├── wireguard-go → utun7         │
+ │  Editor     Logs  Settings  │  socket    │    ├── 内核 WireGuard → wgtun-wg0   │
+ │                             │ /var/run/  │    ├── wireguard-go → utun0 / wgtun-*│
  │  读取实时状态、编辑配置、    │ wgtun.sock │    └── ... 任意数量实例             │
  │  跟随日志                    │ (root:admin│                                     │
- │                             │  0660)     │  原生 UAPI：下发/查询配置            │
- └─────────────────────────────┘            │  ifconfig / route 配置地址路由      │
+ │                             │  0660)     │  内核：wgctrl/netlink               │
+ └─────────────────────────────┘            │  userspace：原生 UAPI               │
+                                            │  ifconfig/route（macOS）· ip（Linux）│
                                             │  收养 · 退避 · DNS 重解析           │
                                             │   ├─ 开机未就绪                     │
-                                            │   └─ DDNS 变更（60s）               │
+                                            │   └─ DDNS 变更（健康门控）           │
                                             │  /var/lib/wgtun/state.json          │
                                             │  /var/log/wgtun/events.jsonl        │
                                             └─────────────────────────────────────┘
 ```
 
-- **守护进程独占进程树。** 每个实例是一个 `wireguard-go` 进程，带独立记账
-  目录（`/var/run/wgtun/<name>/`：pid 文件 + 内核分配的 tun 名）。配置经原
-  生 UAPI 协议下发；地址、MTU、路由用 `ifconfig`/`route` 配置，与
-  wg-quick 完全一致。
+- **两种后端。** Linux 优先创建内核 WireGuard 接口（`ip link add ... type
+  wireguard`，配置/查询走 netlink/wgctrl）；内核模块不可用时回退到
+  `wireguard-go`。macOS 只有 userspace 一种。配置经 UAPI 或 wgctrl 下发；
+  地址、MTU、路由用 `ifconfig`/`route`（macOS）或 `ip`（Linux）配置。
+- **守护进程独占设备。** 每个实例有独立记账目录
+  （`/var/run/wgtun/<name>/`：pid 文件、内核分配的 tun 名、端点诊断）。
+  端点地址若被 AllowedIPs 覆盖（典型是 `0.0.0.0/0`），守护进程会先给它
+  钉一条物理网关 host route，避免加密包被自己的隧道路由捕获。
 - **自愈而非仅重启。** 收敛循环每 5 秒经 UAPI 探活每个运行中的实例：进程
   死亡或 socket 僵死会清理（杀进程 + 清运行时目录）并按退避重启（10 分钟
   内失败 5 次 → 暂停 5 分钟）。开机时 DNS 未就绪的端点稍后重解析并推送，走
@@ -167,16 +200,18 @@ daemon 启动时会检测 `wireguard-go`（路径与版本显示在设置页）�
   心跳间隔可用 `WGTUN_RECONCILE_INTERVAL` 调（默认 `5s`；请保持远小于 15s
   的端点快通道下限，否则那条车道会被量化到心跳粒度）。设置方式是
   `sudo env WGTUN_RECONCILE_INTERVAL=30s wgtun daemon --install` —— 它会写进
-  plist；由于 `--install` 是按模板重新生成 plist，手工改进去的值活不过下一次
-  安装/升级。
-- **端点 DNS 会被持续跟随，而不是一次写死。** 写成域名的端点会被定时重解析，
-  一旦解析结果变化就**就地**改写该 peer 的 endpoint，让 DDNS 域名始终是一个
-  活地址，而不是开机时冻结下来的快照 —— 详见下节「端点域名跟随（DDNS）」。
-- **崩溃收养。** 守护进程自身崩溃时 wireguard-go 进程继续存活；下次启动按
-  pid + socket 探活收养它们——守护进程重启不会中断隧道。前提是 plist 要求
-  launchd 放过我们的进程组（`AbandonProcessGroup`，否则 `launchctl bootout`
-  会把隧道一起带走）；代价是 `daemon --uninstall` 必须自己收尾，且只会对
-  经 `ps` 确认仍是 wireguard-go 的 pid 发信号。
+  plist。`--install` 虽然按模板重新生成服务定义，但写入的 WGTUN_* 值会保存在
+  `/var/lib/wgtun/service-env.json`，后续修复/升级会复用；手工改 plist 的值
+  仍然活不过下一次安装。
+- **端点 DNS 会被持续跟随，而不是一次写死。** 写成域名的端点会被定时重解析；
+  只有当前端点不再健康时，才**就地**改写该 peer 的 endpoint。健康隧道不会被
+  DNS 答案的变动打断 —— 详见下节「端点域名跟随（DDNS）」。
+- **崩溃收养。** 守护进程自身崩溃时设备继续存活（userspace 是 wireguard-go
+  进程，Linux 内核态是内核里的接口）；下次启动按 pid/socket/接口探活收养它
+  们——守护进程重启不会中断隧道。前提是服务定义让 launchd/systemd 放过子进
+  程（`AbandonProcessGroup` / `KillMode=process`，否则停服务会把隧道一起带
+  走）；代价是 `daemon --uninstall` 必须自己收尾，且只会对经 `ps`/`/proc`
+  确认仍是 wireguard-go 的 pid 发信号。
 - **开机语义。** 启用自启的实例开机自动拉起。干净退出标记区分「整机重启」
   （应用自启）与「守护进程重启」（尊重你手动停止的状态）。
 - **只有一个特权组件。** 你永远不需要 `sudo wgtun`；TUI 经 unix socket 与
@@ -213,17 +248,42 @@ daemon 启动时会检测 `wireguard-go`（路径与版本显示在设置页）�
   │                     ▼
   │                  解析该域名返回的全部 A/AAAA
   │                     │
-  │   实际端点命中其中任何一个？── 是 ──► 什么都不做，静默
-  │                     │ 否
-  └─────────────────► set=1 public_key=<peer> endpoint=<新 ip:port>
-                      (不带 replace_peers) ──► INFO endpoint old -> new
+  │   实际端点命中其中任何一个？
+  │      ├─ 是 ──► 链路健康？
+  │      │           ├─ 是 ──► 保持不动（DEBUG）
+  │      │           └─ 否 ──► 还有别的答案？轮换一条（≥60s/次）
+  │      └─ 否 ──► 链路健康？
+  │                  ├─ 是 ──► 保持当前端点，只记录新答案（DEBUG）
+  │                  └─ 否 ──► set=1 public_key=<peer> endpoint=<新 ip:port>
+  │                            (不带 replace_peers) ──► INFO old -> new
 ```
+
+**只在链路不健康时切换。** 这是刻意的：一个域名可能有多条 A 记录，或者
+本机配了两个解析器而它们给出的答案不一致；"解析一变就推"会让一条本来
+好好的隧道在地址之间来回跳（日志里成对出现 `A -> B` / `B -> A`），而旧地址
+明明还能握手。新策略把 DNS 答案当作**备用信息**：当前端点还在答案集合里且
+握手新鲜，就完全不动；当前端点从答案里消失但链路仍健康，也先按住，等它
+真的死了（握手超过 150s）再切。多答案记录里如果第一条是死的，会在不健康
+时按 60s 节流轮换到下一条。
+
+**健康判定。** 握过手的 peer：最后握手超过 150s 即不健康。从未握手的
+peer：只有配置了 `PersistentKeepalive`、实例已运行超过 2 分钟且确有发包
+（`tx > 0`）才算不健康 —— 否则空闲 peer 会被误判，导致快通道永久敞开。
+
+**看得见。** `wgtun status`（无 TUI）和 TUI 实例详情页都会显示每个域名端点
+的：上次检查时间、使用的解析器、全部答案与 TTL（system 解析器不提供 TTL）、
+fake-IP 标记、以及这次检查的决策（`unchanged` / `held (healthy)` /
+`retargeted` / `rotated`）。
+对应事件也以 DEBUG 级别写入日志。
 
 **两条车道（非等比）。** 健康的隧道每 60 秒复检一次 —— 大致就是 DDNS 记录能
 现实携带的最短 TTL，因此不会用比「答案可能变化的速度」更快的节奏去追问缓存。
 而握手已经超过 150 秒（多于一个 rekey 周期，正是「域名指向了一个死地址」的
 特征）的 peer，改为 15 秒的下限复检，不必等满整个周期。从未握过手的 peer
-刻意留在慢车道：空闲与不可达在观测上无法区分，猜错会让快通道永久敞开。
+默认留在慢车道：空闲与不可达在观测上无法区分，猜错会让快通道永久敞开。
+例外是配置了 keepalive、已运行超过 2 分钟且确有发包却从未握手的 peer ——
+这正是"第一条 DNS 答案是死的"的特征 —— 它也会进快车道，以便轮换到别的
+答案。
 
 ```
 健康隧道     ├──── 60s ────┼──── 60s ────┼──── 60s ────┤
@@ -266,21 +326,52 @@ T ────┴── 握手陈旧 ≤150s ────────┴──�
       └── 快通道开启 ───────────►│◄── 问到的仍是缓存里的旧地址
 ```
 
-因此恢复时间落在 ~20 秒到 TTL + ~1 分钟之间，取决于地址变化时那条缓存还剩
+因此恢复时间落在约 2.5 分钟（必须先越过握手陈旧阈值，快通道才会打开）到
+TTL + 该阈值 + 一个快通道 tick 之间，取决于地址变化时那条缓存还剩
 多少寿命。想消掉这段等待有两条路：把记录 TTL 保持在 60s 以内，或者干脆让
 「反向」不依赖 DNS —— 在远端、面向本机的那个 peer 上加
 `PersistentKeepalive = 25`，它的包会从新地址到达，WireGuard 自身的 roaming
 会在约 25 秒内把端点改过来，完全不涉及域名解析。后者还能覆盖「重解析无论
 多勤都救不了」的情形：DDNS 记录根本没被更新。
 
+### fake-IP 与不可信的系统解析器
+
+如果上游路由器（OpenWrt + OpenClash/Mihomo、Surge 等）开了 fake-IP，
+它对任意域名都可能返回 `198.18.x.x` 这类合成地址。此时：
+
+- 解析器永远返回同一个 fake IP，**真实地址变了也看不出来**；
+- system resolver 的查询还会被路由器的 53 端口劫持，换成别的 DNS 也没用；
+- 隧道能不能通，取决于路由器是否正确代理了发往该 fake IP 的 UDP。
+  WireGuard 握手走 UDP，很多 fake-IP 配置并不转发它。
+
+wgtun 会识别 `198.18.0.0/15` 与 `fc00::/18`，在日志里打 WARN（每端点
+每小时一次）并在诊断里标记 `fake-IP`。要真正绕开 fake-IP，让 daemon 用
+**HTTPS 解析**（53 端口劫持无效）：
+
+```bash
+sudo env WGTUN_ENDPOINT_RESOLVER=doh:https://dns.alidns.com/dns-query \
+  wgtun daemon --install
+```
+
+也支持 `udp:1.1.1.1:53`（适合可信的内网/公网 DNS，仍可能被 53 端口劫持）
+和默认的 `system`。解析器选择会显示在 `wgtun status` 与设置页。注意：改用
+DoH 后看到的是真实地址，但如果隧道本来就靠路由器的 fake-IP 代理在工作，
+切换前先确认真实地址可达。
+
 ## 配置
 
 完整兼容 wg-quick 解析：多行 `Address`、`DNS`、`MTU`、`Table`、
-`PostUp`/`PostDown`（在 up/down 时执行）。两处刻意的取舍：
+`PostUp`/`PostDown`（在 up/down 时执行）。刻意的取舍：
 
 - **DNS 会被解析和保留，但不应用到系统解析器** —— macOS 上全局改 DNS 侵
-  入性大。需要的话用 `PostUp` 钩子自行处理。
-- `Table` 接受但忽略。
+  入性大；Linux 上 resolvconf/systemd-resolved 的实现差异也大。需要的话用
+  `PostUp` 钩子自行处理。
+- `Table`：macOS 忽略；Linux 支持 `off`（不加路由，自己用 `PostUp` 管），
+  数值表会 WARN 并跳过路由（不做 fwmark/policy routing）。
+- Linux 接口名固定为 `wgtun-<实例名>`（超过 15 字符截断 + 4 位哈希），
+  避免与 wg-quick 的 `wg0` 冲突。
+- 内核态下 `wg show` 直接可见；userspace 下两者也可互操作（同一 UAPI
+  协议），`wg show all` 依然可用。
 
 在编辑器保存时做冲突检查：`ListenPort` 与其他 wgtun 实例冲突、或与系统
 已占用端口冲突都会被拒绝（可强制保存绕过）。
@@ -288,25 +379,39 @@ T ────┴── 握手陈旧 ≤150s ────────┴──�
 ## 守护进程运维
 
 ```bash
-sudo wgtun daemon --install     # 安装并启动 com.wgtun.daemon
-sudo wgtun daemon --uninstall   # 停止并移除
+sudo wgtun daemon --install     # 安装并启动服务（launchd / systemd）
+sudo wgtun daemon --uninstall   # 停止并移除（并收掉残留隧道）
 sudo wgtun daemon               # 前台运行（调试用）
-sudo launchctl list | grep wgtun
-sudo wg show all                # 依然可用
+wgtun status                    # daemon 健康 + 每实例端点 DNS 诊断
+
+# macOS
+sudo launchctl print system/com.wgtun.daemon | head
+# Linux
+systemctl status wgtun
+journalctl -u wgtun -n 50
 ```
 
-| 数据 | 位置 |
-|---|---|
-| 隧道配置 | `/usr/local/etc/wireguard/*.conf` |
-| 期望状态（自启/停止） | `/var/lib/wgtun/state.json` |
-| 运行时（socket、pid） | `/var/run/wgtun/` |
-| 事件日志 | `/var/log/wgtun/events.jsonl`（自动轮转） |
-| TUI 设置 | `~/.config/wgtun/settings.json` |
+**自我监督。** daemon 每轮收敛都会更新心跳；若连续 5 分钟没有任何进展
+（死锁/假死），它会记 ERROR 后主动退出，由 launchd/systemd 拉起。隧道进程
+因 `AbandonProcessGroup` / `KillMode=process` 存活，新 daemon 会收养它们，
+所以这次"自杀重启"不会断网。socket 直接不可达时，TUI 会在所有页顶部显示
+红色横幅，按 `R` 通过系统授权对话框（osascript / pkexec）自动执行
+`daemon --install`。
+
+| 数据 | macOS | Linux |
+|---|---|---|
+| 隧道配置 | `/usr/local/etc/wireguard/` | `/etc/wireguard/` |
+| 期望状态 | `/var/lib/wgtun/state.json` | 同左 |
+| 运行时 | `/var/run/wgtun/` | `/run/wgtun/` |
+| 控制 socket | `/var/run/wgtun.sock` | `/run/wgtun.sock` |
+| 事件日志 | `/var/log/wgtun/events.jsonl` | 同左 |
+| TUI 设置 | `~/.config/wgtun/settings.json` | 同左 |
 
 ## 发布
 
-推送 `v*` tag 触发发布流水线：跑测试、构建 darwin/amd64 + arm64、创建
-GitHub Release，并把 `Formula/wgtun.rb` 推到 `dncore/homebrew-tap`。
+推送 `v*` tag 触发发布流水线：跑测试（含 Ubuntu 上的 Linux 测试）、构建
+darwin/amd64 + arm64 与 linux/amd64 + arm64、创建 GitHub Release，并把
+`Formula/wgtun.rb` 推到 `dncore/homebrew-tap`。
 
 **一次性配置**（本仓库已完成）：
 
@@ -333,13 +438,17 @@ git push origin v0.2.0
 
 | 现象 | 检查 |
 |---|---|
-| TUI 显示 `daemon offline` | `sudo wgtun daemon --install`；socket 位于 `/var/run/wgtun.sock` |
+| TUI 显示 `daemon offline` | 顶部红色横幅下按 `R`（弹系统授权）；或手动 `sudo wgtun daemon --install`；`wgtun status` 可定位 |
+| 日志成对出现 `A -> B` / `B -> A` 切换 | 旧版本的"解析一变就切"；本版只在链路不健康时切换。若仍频繁切换，查 `wgtun status` 的 handshake 与 fake-IP 标记 |
+| 端点解析结果是 `198.18.x.x` | 上游 fake-IP；用 `WGTUN_ENDPOINT_RESOLVER=doh:https://dns.alidns.com/dns-query` 重装 daemon |
+| Linux 没走内核态 | `lsmod \| grep wireguard`；`sudo modprobe wireguard`；或 `WGTUN_BACKEND=kernel` 强制，失败会回退并记日志 |
+| Linux TUI 连不上 socket | 安装时是否以 `sudo` 运行（会把调用者主组写进 unit）；或 `sudo env WGTUN_SOCKET_GROUP=$(id -gn) wgtun daemon --install` |
 | `brew upgrade` 后 daemon 不再启动 | `sudo wgtun daemon --install` —— 0.2.1 及更早版本会把带版本号的 `Cellar/...` 路径写进 plist |
 | 实例已启动但无握手 | 日志页或 `/var/log/wgtun/events.jsonl`；检查端点 DNS |
 | 实例反复重启 | 日志页有原因；连续 5 次失败后会自动退避 |
 | 日志出现 `still absent from the device ... giving up` | 该 peer 的公钥与本实例自己的公钥相同；wireguard-go 会返回 `errno=0` 但静默丢弃这个 peer |
 | 开机时 DNS 未就绪，某个 peer 迟迟没有端点 | 预期行为：daemon 会持续重试单 peer 推送，解析器可用前 `unresolved (will retry)` 警告会反复出现 |
-| 对端 IP 变更后隧道断掉且日志没有 `dns changed` 事件 | DDNS 记录 TTL 大于 60s，解析器仍在返回旧答案，请调低 TTL。若配置里端点写成字面量 `ip:port`，按设计不会被重解析 |
+| 对端 IP 变更后隧道断掉且日志没有 `dns changed` 事件 | DDNS 记录 TTL 大于 60s，解析器仍在返回旧答案，请调低 TTL。健康隧道会刻意保持当前端点（DNS 变了也不切）；若配置里端点写成字面量 `ip:port`，按设计不会被重解析 |
 | 保存时报端口冲突 | 编辑器会指出冲突的实例名或宿主进程 |
 
 ## 开发
@@ -348,7 +457,9 @@ git push origin v0.2.0
 go build -o wgtun ./cmd/wgtun
 sudo env WGTUN_CONF_DIR=$PWD/conf ./wgtun daemon   # 沙箱运行
 
-go test ./...           # 单元 + 集成测试
+go test ./...                                  # 单元 + 集成测试（macOS）
+GOOS=linux GOARCH=amd64 go build ./...         # Linux 交叉编译
+GOOS=linux GOARCH=amd64 go vet ./...
 ```
 
 所有路径都可用 `WGTUN_*` 环境变量覆盖（见 `internal/paths`），守护进程可

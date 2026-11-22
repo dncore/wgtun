@@ -30,13 +30,13 @@ func Main(args []string) {
 	}
 	switch {
 	case *install:
-		if err := InstallLaunchd(); err != nil {
+		if err := installService(); err != nil {
 			fmt.Fprintln(os.Stderr, "wgtun daemon --install:", err)
 			os.Exit(1)
 		}
 		return
 	case *uninstall:
-		if err := UninstallLaunchd(); err != nil {
+		if err := uninstallService(); err != nil {
 			fmt.Fprintln(os.Stderr, "wgtun daemon --uninstall:", err)
 			os.Exit(1)
 		}
@@ -75,24 +75,28 @@ func run() error {
 	}
 
 	sup := New(st, ev)
+	api.SetVersion(Version)
+	// The backend must be known before adoption: a Linux daemon restart has
+	// to look for kernel interfaces or wireguard-go processes accordingly.
+	selectBackend(ev)
 	if err := sup.LoadConfigs(); err != nil {
 		return err
 	}
 	sup.Adopt() // take over instances still alive from a previous daemon
 	sup.BootInit(freshBoot)
 
-	api.SetVersion(Version)
-	wgPath, wgOK, wgVer := detectWireGuardGo(ev)
-	api.SetWireGuardGoInfo(wgPath, wgOK, wgVer)
+	interval := reconcileInterval(ev)
+	api.SetReconcileInterval(interval)
 	srv, err := api.Serve(sup, ev, paths.SocketPath)
 	if err != nil {
 		return err
 	}
-	ev.Info("", "wgtun daemon started (socket %s, configs %s)", paths.SocketPath, paths.ConfDir)
+	ev.Info("", "wgtun daemon started (socket %s, configs %s, backend %s)", paths.SocketPath, paths.ConfDir, backendSummary())
+	go watchdog(ev, sup, interval)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	ticker := time.NewTicker(reconcileInterval(ev))
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -105,6 +109,39 @@ func run() error {
 			return nil
 		}
 	}
+}
+
+// watchdog turns a wedged reconcile loop into a process exit so launchd /
+// systemd can restart the daemon. A live socket is not proof of a working
+// daemon: a deadlock inside the supervisor leaves the API answering (or
+// hanging) while tunnels silently stop being supervised. Tunnels survive the
+// restart and are re-adopted, so exiting is the cheap, safe recovery.
+//
+// The threshold is well above one tick: a slow pass over many instances and
+// unanswered DNS lookups is not a hang, and the supervisor beats between
+// every probe. Only a loop that makes no progress at all for the whole window
+// gets killed.
+func watchdog(ev *logs.Store, sup *Supervisor, interval time.Duration) {
+	limit := watchdogLimit(interval)
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		if age := time.Since(sup.LastBeat()); age > limit {
+			ev.Error("", "reconcile loop made no progress for %s (limit %s); exiting so the service manager can restart the daemon", age.Round(time.Second), limit)
+			os.Exit(3)
+		}
+	}
+}
+
+// watchdogLimit is how long the reconcile loop may make no progress before
+// the daemon exits. It is far above one tick so a slow pass is not mistaken
+// for a hang; the supervisor beats between every probe and DNS lookup.
+func watchdogLimit(interval time.Duration) time.Duration {
+	limit := 10 * interval
+	if limit < 5*time.Minute {
+		limit = 5 * time.Minute
+	}
+	return limit
 }
 
 // reconcileInterval is how often the supervisor probes instances and picks up

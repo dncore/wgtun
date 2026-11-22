@@ -88,7 +88,10 @@ const (
 type tickMsg time.Time
 
 // appMsg wraps a sub-model message so it dispatches to the active tab.
-type appMsg struct{ dst tabID; msg tea.Msg }
+type appMsg struct {
+	dst tabID
+	msg tea.Msg
+}
 
 // statusMsg sets the one-line status text; rendered through i18n at display
 // time so the current language always applies.
@@ -101,21 +104,24 @@ type statusMsg struct {
 type refreshMsg struct{}
 
 type app struct {
-	lang    i18n.Lang
-	tab     tabID
-	client  *api.Client
-	ctx     context.Context
-	cancel  context.CancelFunc
+	lang   i18n.Lang
+	tab    tabID
+	client *api.Client
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	// per-tab sub-models
-	dash    *dashboardModel
-	inst    *instancesModel
-	logs    *logsModel
+	dash     *dashboardModel
+	inst     *instancesModel
+	logs     *logsModel
 	settings *settingsModel
 
-	status   string
-	busy     bool
-	offline  bool
+	status  string
+	busy    bool
+	offline bool
+	// offlineSince drives the outage banner; it is only touched in the update
+	// loop (the poll goroutine reports through pollDoneMsg).
+	offlineSince time.Time
 
 	width, height int
 }
@@ -124,15 +130,15 @@ func newApp() *app {
 	ctx, cancel := context.WithCancel(context.Background())
 	lang := i18n.LoadSettings().Lang
 	return &app{
-		lang:   lang,
-		client: api.Connect(paths.SocketPath),
-		ctx:    ctx,
-		cancel: cancel,
-		dash:   newDashboard(),
-		inst:   newInstances(),
-		logs:   newLogs(),
+		lang:     lang,
+		client:   api.Connect(paths.SocketPath),
+		ctx:      ctx,
+		cancel:   cancel,
+		dash:     newDashboard(),
+		inst:     newInstances(),
+		logs:     newLogs(),
 		settings: newSettings(lang),
-		status: "", // set once an action reports something
+		status:   "", // set once an action reports something
 	}
 }
 
@@ -160,7 +166,9 @@ func (a *app) fetchState() tea.Cmd {
 	})
 }
 
-// poll fetches instances + state and refreshes the current tab.
+// poll fetches instances + state and refreshes the current tab. It must not
+// touch the model from its goroutine: the result travels back as a message and
+// is applied in Update (writing a.offline here raced with the redraw loop).
 func (a *app) poll() tea.Cmd {
 	return async(func() tea.Msg {
 		tracef("poll start")
@@ -168,12 +176,7 @@ func (a *app) poll() tea.Cmd {
 		defer cancel()
 		views, err := a.client.Instances(ctx)
 		tracef("poll done err=%v views=%d", err, len(views))
-		if err != nil {
-			a.offline = true
-			return pollDoneMsg{err: err}
-		}
-		a.offline = false
-		return pollDoneMsg{views: views}
+		return pollDoneMsg{views: views, err: err}
 	})
 }
 
@@ -205,6 +208,12 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tea.KeyMsg:
+		// R repairs a missing daemon from any tab. Not while the config
+		// editor is open: there R is an ordinary character.
+		if m.String() == "R" && !a.textInputFocused() {
+			a.status = i18n.T(a.lang, i18n.RepairRunning)
+			return a, a.repair()
+		}
 		switch m.Type {
 		case tea.KeyTab, tea.KeyShiftTab:
 			dir := 1
@@ -243,18 +252,29 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pollDoneMsg:
 		if m.err != nil {
-			a.status = i18n.T(a.lang, i18n.DaemonOffline)
+			if !a.offline {
+				a.offline = true
+				a.offlineSince = time.Now()
+			}
+			a.status = ""
 			a.dash.setOffline(true)
 			return a, nil
 		}
+		wasOffline := a.offline
+		a.offline = false
 		a.dash.setOffline(false)
 		a.dash.setViews(m.views)
 		a.inst.setViews(m.views)
+		var cmds []tea.Cmd
+		if wasOffline {
+			// Recovery (usually via the R repair): refresh the daemon/service
+			// facts shown in Settings without requiring a manual reload.
+			cmds = append(cmds, a.settings.fetchState())
+		}
 		// live per-instance status is only needed by the dashboard
 		if a.tab != tabDashboard {
-			return a, nil
+			return a, tea.Batch(cmds...)
 		}
-		var cmds []tea.Cmd
 		for _, v := range m.views {
 			if v.Running {
 				cmds = append(cmds, a.dash.fetchStatusCmd(a.client, v.Name))
@@ -310,6 +330,45 @@ func (a *app) forward(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, tea.Batch(cmds...)
 }
 
+// textInputFocused reports whether a key belongs to a text field rather than
+// to the global shortcut layer.
+func (a *app) textInputFocused() bool {
+	// The editor consumes ordinary characters; a pending delete confirmation
+	// is modal too, so leave R alone while either is up.
+	return a.tab == tabInstances && (a.inst.editing || a.inst.confirmName != "")
+}
+
+// repair probes the daemon and, when it is gone, asks the OS for
+// administrator authorization to run `wgtun daemon --install` (which also
+// re-bootstraps a job that was booted out). It then waits for the socket.
+func (a *app) repair() tea.Cmd {
+	return async(func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		st, err := a.client.State(ctx)
+		cancel()
+		// A socket that answers is not enough: a stalled reconcile loop (or an
+		// old daemon that cannot report health) needs a real restart too. An
+		// older daemon reports a zero LastReconcile, which means "unknown".
+		if err == nil && (st.Healthy || st.LastReconcile.IsZero()) {
+			return statusMsg{key: i18n.DaemonRunning}
+		}
+		if err := elevateInstall(); err != nil {
+			return statusMsg{key: i18n.RepairFailed, args: []any{err}}
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			_, err := a.client.State(ctx)
+			cancel()
+			if err == nil {
+				return refreshMsg{}
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		return statusMsg{key: i18n.RepairFailed, args: []any{"daemon did not come back within 10s"}}
+	})
+}
+
 func (a *app) View() string {
 	title := i18n.T(a.lang, i18n.DashboardTitle)
 	if a.offline {
@@ -335,8 +394,24 @@ func (a *app) View() string {
 	// footer keys
 	footer := a.renderFooter()
 
+	// A daemon outage is a global condition: show it on every tab, not just
+	// in the status line at the bottom where it is easy to miss.
+	var banner string
+	if a.offline {
+		age := "?"
+		if !a.offlineSince.IsZero() {
+			age = humanDur(time.Since(a.offlineSince).Round(time.Second))
+		}
+		hint := " · " + i18n.T(a.lang, i18n.DaemonRepairHint)
+		if a.textInputFocused() {
+			hint = "" // R belongs to the editor while it is open
+		}
+		banner = offlineBanner.Render("⚠ " + i18n.T(a.lang, i18n.DaemonOfflineFor, age) + hint)
+	}
+
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		tabs,
+		banner,
 		body,
 		"",
 		statusBar.Render(status+"   "+footer),
@@ -406,6 +481,9 @@ func (a *app) renderFooter() string {
 		)
 	case tabDashboard:
 		keys = append(keys, key(i18n.T(a.lang, i18n.KeyRefresh), "r"))
+	}
+	if !a.textInputFocused() {
+		keys = append(keys, key(i18n.T(a.lang, i18n.KeyRepair), "R"))
 	}
 	keys = append(keys, key(i18n.T(a.lang, i18n.KeyQuit), "ctrl+q"))
 	var b strings.Builder

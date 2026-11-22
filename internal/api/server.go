@@ -25,6 +25,11 @@ type Supervisor interface {
 	Views() []wire.InstanceView
 	LiveStatus(name string) (*uapi.DeviceStatus, time.Time, error)
 	DevicePublicKey(name string) string
+	EndpointDiags(name string) []wire.EndpointDiag
+	ResolverInfo() string
+	LastReconcile() time.Time
+	LastReconcileDuration() time.Duration
+	LastBeat() time.Time
 	Conf(name string) (string, error)
 	Start(name string) error
 	Stop(name string) error
@@ -58,9 +63,12 @@ func Serve(sup Supervisor, ev Logger, sockPath string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	// group-writable for the admin group so the unprivileged TUI can connect
-	if err := os.Chown(sockPath, 0, adminGid()); err == nil {
-		os.Chmod(sockPath, 0o660)
+	// group-writable for the configured/service group so the unprivileged TUI
+	// can connect. No suitable group means root-only (0600).
+	if gid := socketGID(); gid > 0 {
+		if err := os.Chown(sockPath, 0, gid); err == nil {
+			os.Chmod(sockPath, 0o660)
+		}
 	}
 
 	srv := &Server{ln: ln}
@@ -68,13 +76,32 @@ func Serve(sup Supervisor, ev Logger, sockPath string) (*Server, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) {
+		last := sup.LastReconcile()
+		age := time.Since(last)
+		interval := time.Duration(reconcileIntervalSec) * time.Second
+		// Health tracks progress, not completion: a pass over many slow DNS
+		// lookups is legitimate, while a loop that stopped beating is not.
+		progressAge := time.Since(sup.LastBeat())
+		staleAfter := 10 * interval
+		if staleAfter < 2*time.Minute {
+			staleAfter = 2 * time.Minute
+		}
 		writeJSON(w, wire.StateInfo{
 			Version: version, Started: started, Socket: sockPath,
 			ConfDir: paths.ConfDir, RunDir: paths.RunDir, LogDir: paths.LogDir,
-			UpSec:              int64(time.Since(started).Seconds()),
-			WireGuardGoPath:    wgGoPath,
-			WireGuardGoVersion: wgGoVersion,
-			WireGuardGoOK:      wgGoOK,
+			UpSec:                int64(time.Since(started).Seconds()),
+			WireGuardGoPath:      wgGoPath,
+			WireGuardGoVersion:   wgGoVersion,
+			WireGuardGoOK:        wgGoOK,
+			EndpointResolver:     sup.ResolverInfo(),
+			Backend:              backendName,
+			BackendDetail:        backendDetail,
+			Pid:                  os.Getpid(),
+			LastReconcile:        last,
+			ReconcileAgeSec:      age.Seconds(),
+			ReconcileLastSec:     sup.LastReconcileDuration().Seconds(),
+			ReconcileIntervalSec: int64(interval.Seconds()),
+			Healthy:              progressAge <= staleAfter,
 		})
 	})
 	mux.HandleFunc("GET /instances", func(w http.ResponseWriter, r *http.Request) {
@@ -96,6 +123,7 @@ func Serve(sup Supervisor, ev Logger, sockPath string) (*Server, error) {
 			resp.StatusAge = time.Since(at).Seconds()
 		}
 		resp.DevicePublicKey = sup.DevicePublicKey(name)
+		resp.Endpoints = sup.EndpointDiags(name)
 		writeJSON(w, resp)
 	})
 	mux.HandleFunc("GET /instances/{name}/conf", func(w http.ResponseWriter, r *http.Request) {
@@ -178,12 +206,30 @@ var version = "dev"
 // SetVersion records the binary version for /state.
 func SetVersion(v string) { version = v }
 
+// reconcileIntervalSec is the daemon's configured reconcile cadence, set
+// before Serve starts. The TUI uses it to judge whether the loop is stale.
+var reconcileIntervalSec int64
+
+// SetReconcileInterval records the reconcile cadence for /state.
+func SetReconcileInterval(d time.Duration) { reconcileIntervalSec = int64(d.Seconds()) }
+
 // wireguard-go detection result, set from the daemon at startup.
 var (
 	wgGoPath    string
 	wgGoVersion string
 	wgGoOK      bool
 )
+
+// backend selection, set from the daemon at startup.
+var (
+	backendName   = "userspace"
+	backendDetail string
+)
+
+// SetBackendInfo records the selected WireGuard backend for /state.
+func SetBackendInfo(name, detail string) {
+	backendName, backendDetail = name, detail
+}
 
 // SetWireGuardGoInfo records the detected userspace implementation for /state.
 func SetWireGuardGoInfo(path string, ok bool, version string) {
@@ -275,13 +321,35 @@ func okResp() ok { return ok{OK: true} }
 
 // ---- helpers ----
 
-func adminGid() int {
-	if g, err := user.LookupGroup("admin"); err == nil {
-		if n, err := strconv.Atoi(g.Gid); err == nil {
+// socketGID resolves the group that may connect to the control socket:
+// WGTUN_SOCKET_GROUP (name or numeric), then the platform's conventional
+// admin groups. 0 means root-only.
+func socketGID() int {
+	if spec := paths.SocketGroup(); spec != "" {
+		if n, err := strconv.Atoi(spec); err == nil {
+			return n
+		}
+		if g, err := user.LookupGroup(spec); err == nil {
+			if n, err := strconv.Atoi(g.Gid); err == nil {
+				return n
+			}
+		}
+	}
+	// A foreground `sudo wgtun daemon` carries the caller's gid; use it for
+	// the debug run instead of falling back to wheel/sudo membership.
+	if gid := os.Getenv("SUDO_GID"); gid != "" {
+		if n, err := strconv.Atoi(gid); err == nil {
 			return n
 		}
 	}
-	return 0 // fall back to root-only socket
+	for _, name := range defaultSocketGroups {
+		if g, err := user.LookupGroup(name); err == nil {
+			if n, err := strconv.Atoi(g.Gid); err == nil {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -1,16 +1,17 @@
 package daemon
 
 import (
-	"context"
-	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dncore/wgtun/internal/logs"
 	"github.com/dncore/wgtun/internal/paths"
+	"github.com/dncore/wgtun/internal/resolver"
 	"github.com/dncore/wgtun/internal/wgconf"
 )
 
@@ -23,10 +24,27 @@ type endpointRig struct {
 	got  chan string
 }
 
+// rigOpts controls the fake device behind an endpointRig.
+type rigOpts struct {
+	confEndpoint string
+	liveEndpoint string
+	onDevice     bool
+	handshakeAge time.Duration // 0 = the peer never handshaked
+	keepalive    int
+}
+
 // newEndpointRig writes a config whose single peer points at confEndpoint and
 // installs a fake device whose status reports liveEndpoint for it (or no peer
-// at all when onDevice is false).
+// at all when onDevice is false). Without a handshake age the peer looks like
+// it never handshaked.
 func newEndpointRig(t *testing.T, confEndpoint, liveEndpoint string, onDevice bool) *endpointRig {
+	t.Helper()
+	return newEndpointRigOpts(t, rigOpts{
+		confEndpoint: confEndpoint, liveEndpoint: liveEndpoint, onDevice: onDevice,
+	})
+}
+
+func newEndpointRigOpts(t *testing.T, o rigOpts) *endpointRig {
 	t.Helper()
 	sup, _ := newTestSupervisor(t)
 	priv, _ := wgconf.GeneratePrivateKey()
@@ -34,8 +52,11 @@ func newEndpointRig(t *testing.T, confEndpoint, liveEndpoint string, onDevice bo
 
 	content := "[Interface]\nPrivateKey = " + priv + "\nAddress = 203.0.113.2/24\nMTU = 1420\n\n" +
 		"[Peer]\nPublicKey = " + peerPub + "\nAllowedIPs = 203.0.113.0/24\n"
-	if confEndpoint != "" {
-		content += "Endpoint = " + confEndpoint + "\n"
+	if o.confEndpoint != "" {
+		content += "Endpoint = " + o.confEndpoint + "\n"
+	}
+	if o.keepalive > 0 {
+		content += "PersistentKeepalive = " + strconv.Itoa(o.keepalive) + "\n"
 	}
 	if err := os.WriteFile(filepath.Join(paths.ConfDir, "wg1.conf"), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -54,14 +75,21 @@ func newEndpointRig(t *testing.T, confEndpoint, liveEndpoint string, onDevice bo
 	t.Cleanup(func() { paths.WireGuardSockDir = oldSock })
 
 	reply := "errno=0\nlisten_port=51820\n\n"
-	if onDevice {
+	if o.onDevice {
 		hexKey, err := wgconf.KeyHex(peerPub)
 		if err != nil {
 			t.Fatal(err)
 		}
 		reply = "errno=0\nlisten_port=51820\npublic_key=" + hexKey + "\n"
-		if liveEndpoint != "" {
-			reply += "endpoint=" + liveEndpoint + "\n"
+		if o.liveEndpoint != "" {
+			reply += "endpoint=" + o.liveEndpoint + "\n"
+		}
+		if o.keepalive > 0 {
+			reply += "persistent_keepalive_interval=" + strconv.Itoa(o.keepalive) + "\n"
+		}
+		if o.handshakeAge > 0 {
+			reply += "last_handshake_time_sec=" + strconv.FormatInt(time.Now().Add(-o.handshakeAge).Unix(), 10) + "\n"
+			reply += "tx_bytes=4096\n"
 		}
 		reply += "allowed_ip=203.0.113.0/24\n\n"
 	}
@@ -117,8 +145,11 @@ func hasRequest(reqs []string, substr string) bool {
 // somewhere else now, so the peer is retargeted with one peer block and no
 // replace_peers, which leaves the session and allowed IPs alone.
 func TestReconcileRetargetsMovedEndpoint(t *testing.T) {
-	rig := newEndpointRig(t, "ddns.example:51820", "203.0.113.7:51820", true)
-	stubLookup(t, map[string][]string{"ddns.example": {"198.51.100.7"}})
+	rig := newEndpointRigOpts(t, rigOpts{
+		confEndpoint: "ddns.example:51820", liveEndpoint: "203.0.113.7:51820",
+		onDevice: true, handshakeAge: handshakeStaleAfter + time.Minute,
+	})
+	stubLookup(t, rig.sup, map[string][]string{"ddns.example": {"198.51.100.7"}})
 
 	rig.prime(t)
 	rig.sup.Reconcile()
@@ -141,7 +172,7 @@ func TestReconcileRetargetsMovedEndpoint(t *testing.T) {
 // between equivalent addresses would be churn, not progress.
 func TestReconcileKeepsEndpointWhenAnyCandidateMatches(t *testing.T) {
 	rig := newEndpointRig(t, "ddns.example:51820", "203.0.113.7:51820", true)
-	stubLookup(t, map[string][]string{"ddns.example": {"198.51.100.7", "203.0.113.7"}})
+	stubLookup(t, rig.sup, map[string][]string{"ddns.example": {"198.51.100.7", "203.0.113.7"}})
 
 	rig.prime(t)
 	rig.sup.Reconcile()
@@ -151,7 +182,7 @@ func TestReconcileKeepsEndpointWhenAnyCandidateMatches(t *testing.T) {
 // A literal ip:port is authoritative and never re-resolved.
 func TestReconcileIgnoresLiteralEndpoint(t *testing.T) {
 	rig := newEndpointRig(t, "203.0.113.9:51820", "203.0.113.7:51820", true)
-	stubLookup(t, map[string][]string{}) // any lookup would fail loudly
+	stubLookup(t, rig.sup, map[string][]string{}) // any lookup would fail loudly
 
 	rig.prime(t)
 	rig.sup.Reconcile()
@@ -161,7 +192,7 @@ func TestReconcileIgnoresLiteralEndpoint(t *testing.T) {
 // DNS being down is not fatal and not a reason to invent a push.
 func TestReconcileUnresolvedEndpointWarnsAndPushesNothing(t *testing.T) {
 	rig := newEndpointRig(t, "ddns.example:51820", "203.0.113.7:51820", true)
-	stubLookup(t, map[string][]string{}) // NXDOMAIN
+	stubLookup(t, rig.sup, map[string][]string{}) // NXDOMAIN
 
 	rig.prime(t)
 	rig.sup.Reconcile()
@@ -175,7 +206,7 @@ func TestReconcileUnresolvedEndpointWarnsAndPushesNothing(t *testing.T) {
 // block, and the device's allowed IPs are left alone.
 func TestReconcileFillsEndpointWithoutAllowedIPs(t *testing.T) {
 	rig := newEndpointRig(t, "ddns.example:51820", "", true) // peer exists, no endpoint
-	stubLookup(t, map[string][]string{"ddns.example": {"198.51.100.7"}})
+	stubLookup(t, rig.sup, map[string][]string{"ddns.example": {"198.51.100.7"}})
 
 	rig.prime(t)
 	rig.sup.Reconcile()
@@ -198,7 +229,7 @@ func TestReconcileFillsEndpointWithoutAllowedIPs(t *testing.T) {
 // still without replace_peers, so other peers are untouched.
 func TestReconcileUpsertsMissingPeer(t *testing.T) {
 	rig := newEndpointRig(t, "ddns.example:51820", "", false) // device has no peers
-	stubLookup(t, map[string][]string{"ddns.example": {"198.51.100.7"}})
+	stubLookup(t, rig.sup, map[string][]string{"ddns.example": {"198.51.100.7"}})
 
 	rig.prime(t)
 	rig.sup.Reconcile()
@@ -221,7 +252,7 @@ func TestReconcileUpsertsMissingPeer(t *testing.T) {
 // the device's own) must not be re-pushed on every tick forever.
 func TestReconcileGivesUpOnRefusedPeer(t *testing.T) {
 	rig := newEndpointRig(t, "ddns.example:51820", "", false)
-	stubLookup(t, map[string][]string{"ddns.example": {"198.51.100.7"}})
+	stubLookup(t, rig.sup, map[string][]string{"ddns.example": {"198.51.100.7"}})
 	rig.prime(t)
 
 	for n := 0; n < peerFillGiveUp; n++ {
@@ -239,8 +270,11 @@ func TestReconcileGivesUpOnRefusedPeer(t *testing.T) {
 
 // A healthy peer is left alone, and any earlier give-up counter is cleared.
 func TestReconcileLeavesHealthyPeerAlone(t *testing.T) {
-	rig := newEndpointRig(t, "ddns.example:51820", "198.51.100.7:51820", true)
-	stubLookup(t, map[string][]string{"ddns.example": {"198.51.100.7"}})
+	rig := newEndpointRigOpts(t, rigOpts{
+		confEndpoint: "ddns.example:51820", liveEndpoint: "198.51.100.7:51820",
+		onDevice: true, handshakeAge: time.Minute,
+	})
+	stubLookup(t, rig.sup, map[string][]string{"ddns.example": {"198.51.100.7"}})
 
 	rig.prime(t)
 	rig.inst.bumpPeerRetry(rig.peer)
@@ -251,24 +285,48 @@ func TestReconcileLeavesHealthyPeerAlone(t *testing.T) {
 	}
 }
 
+// A healthy tunnel keeps its current endpoint even when DNS answers with a
+// different address: two resolvers disagreeing (or a two-A record) must not
+// make a working tunnel flap. The new answer is used only once the current
+// endpoint stops carrying traffic.
+func TestReconcileHoldsHealthyEndpointOnDNSChange(t *testing.T) {
+	rig := newEndpointRigOpts(t, rigOpts{
+		confEndpoint: "ddns.example:51820", liveEndpoint: "203.0.113.7:51820",
+		onDevice: true, handshakeAge: time.Minute,
+	})
+	stubLookup(t, rig.sup, map[string][]string{"ddns.example": {"198.51.100.7"}})
+
+	rig.prime(t)
+	rig.sup.Reconcile()
+	requireNoSet(t, rig.got)
+	if !hasEvent(rig.sup.ev, logs.Debug, "not applied") {
+		t.Error("holding a healthy endpoint should be logged at debug level")
+	}
+}
+
 // TestReconcileReleasesTheLockDuringIO is the point of the three-phase pass:
 // while a lookup is in flight the supervisor lock must be free. Holding it
 // across the DNS lookup (up to its timeout) is what used to stall the TUI and
 // every API call.
 func TestReconcileReleasesTheLockDuringIO(t *testing.T) {
-	rig := newEndpointRig(t, "ddns.example:51820", "203.0.113.7:51820", true)
+	rig := newEndpointRigOpts(t, rigOpts{
+		confEndpoint: "ddns.example:51820", liveEndpoint: "203.0.113.7:51820",
+		onDevice: true, handshakeAge: handshakeStaleAfter + time.Minute,
+	})
 	rig.prime(t)
 
 	lookupStarted := make(chan struct{})
 	lookupRelease := make(chan struct{})
 	apiProceeded := make(chan struct{})
-	old := lookupIPAddr
-	lookupIPAddr = func(_ context.Context, host string) ([]net.IPAddr, error) {
+	old := rig.sup.res
+	rig.sup.res = &stubResolver{fn: func(host string) (resolver.Result, error) {
 		close(lookupStarted)
 		<-lookupRelease // hold the lookup open while the API is poked
-		return []net.IPAddr{{IP: net.ParseIP("198.51.100.7")}}, nil
-	}
-	t.Cleanup(func() { lookupIPAddr = old })
+		return resolver.Result{Server: "stub", Answers: []resolver.Answer{{
+			IP: netip.MustParseAddr("198.51.100.7"), TTL: time.Minute,
+		}}}, nil
+	}}
+	t.Cleanup(func() { rig.sup.res = old })
 
 	finished := make(chan struct{})
 	go func() {
@@ -426,7 +484,7 @@ func BenchmarkLoadConfigsAfterTouch(b *testing.B) {
 func BenchmarkReconcilePass(b *testing.B) {
 	t := &testing.T{}
 	rig := newEndpointRig(t, "ddns.example:51820", "203.0.113.7:51820", true)
-	stubLookup(t, map[string][]string{"ddns.example": {"203.0.113.7"}})
+	stubLookup(t, rig.sup, map[string][]string{"ddns.example": {"203.0.113.7"}})
 	rig.sup.Reconcile()
 	drain(rig.got)
 	b.ResetTimer()

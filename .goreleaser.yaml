@@ -15,6 +15,7 @@ builds:
       - -s -w -X main.version={{ .Version }}
     goos:
       - darwin
+      - linux
     goarch:
       - amd64
       - arm64
@@ -23,6 +24,9 @@ builds:
 archives:
   - formats: [zip]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: linux
+        formats: [tar.gz]
 
 # Re-runs replace an existing release's assets instead of failing with
 # "already_exists" (keeps the pipeline idempotent).
@@ -32,7 +36,7 @@ release:
 brews:
   - name: wgtun
     homepage: "https://github.com/dncore/wgtun"
-    description: "WireGuard orchestrator: TUI + launchd daemon for wireguard-go"
+    description: "WireGuard orchestrator: TUI + root daemon (launchd/systemd)"
     license: MIT
     dependencies:
       - wireguard-go
@@ -55,12 +59,15 @@ brews:
       log_path "/var/log/wgtun/daemon.out.log"
       error_log_path "/var/log/wgtun/daemon.err.log"
     caveats: |
-      Start the daemon (requires root for the launchd LaunchDaemon):
+      Start the daemon (requires root: LaunchDaemon on macOS, systemd unit on
+      Linux):
 
         sudo brew services start wgtun
 
-      Or install the plist directly:
+      Or install the service directly:
 
         sudo wgtun daemon --install
 
-      Then open the TUI with `wgtun`.
+      Linux prefers the in-kernel WireGuard module and falls back to
+      wireguard-go when it is unavailable. Set WGTUN_BACKEND=kernel or
+      userspace to force one. Then open the TUI with `wgtun`.

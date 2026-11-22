@@ -3,11 +3,13 @@ package daemon
 import (
 	"context"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dncore/wgtun/internal/logs"
+	"github.com/dncore/wgtun/internal/resolver"
 	"github.com/dncore/wgtun/internal/uapi"
 	"github.com/dncore/wgtun/internal/wgconf"
 )
@@ -57,22 +59,35 @@ func fakeUAPI(t *testing.T, sockPath, getReply string) chan string {
 	return got
 }
 
-// stubLookup replaces the resolver seam with a static zone.
-func stubLookup(t *testing.T, zone map[string][]string) {
-	t.Helper()
-	old := lookupIPAddr
-	lookupIPAddr = func(_ context.Context, host string) ([]net.IPAddr, error) {
-		ips, ok := zone[host]
-		if !ok {
-			return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
-		}
-		out := make([]net.IPAddr, 0, len(ips))
-		for _, s := range ips {
-			out = append(out, net.IPAddr{IP: net.ParseIP(s)})
-		}
-		return out, nil
+// stubResolver is a resolver.Resolver with a static zone or a custom function.
+type stubResolver struct {
+	zone map[string][]string
+	fn   func(host string) (resolver.Result, error)
+}
+
+func (s *stubResolver) String() string { return "stub" }
+
+func (s *stubResolver) Lookup(_ context.Context, host string) (resolver.Result, error) {
+	if s.fn != nil {
+		return s.fn(host)
 	}
-	t.Cleanup(func() { lookupIPAddr = old })
+	ips, ok := s.zone[host]
+	if !ok {
+		return resolver.Result{Server: "stub"}, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	res := resolver.Result{Server: "stub", TTL: 60 * time.Second}
+	for _, ip := range ips {
+		res.Answers = append(res.Answers, resolver.Answer{IP: netip.MustParseAddr(ip), TTL: 60 * time.Second})
+	}
+	return res, nil
+}
+
+// stubLookup installs a static DNS zone on a supervisor for one test.
+func stubLookup(t *testing.T, sup *Supervisor, zone map[string][]string) {
+	t.Helper()
+	old := sup.res
+	sup.res = &stubResolver{zone: zone}
+	t.Cleanup(func() { sup.res = old })
 }
 
 // waitSet returns the next request that is not the periodic get=1 probe: every
@@ -143,14 +158,14 @@ func TestIsHostnameEndpoint(t *testing.T) {
 
 func TestResolveEndpointAll(t *testing.T) {
 	calls := 0
-	stubLookup(t, map[string][]string{"ddns.example": {"198.51.100.7", "2001:db8::7"}})
-	old := lookupIPAddr
-	lookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	base := &stubResolver{zone: map[string][]string{"ddns.example": {"198.51.100.7", "2001:db8::7"}}}
+	s := &Supervisor{res: &stubResolver{fn: func(host string) (resolver.Result, error) {
 		calls++
-		return old(ctx, host)
-	}
+		return base.Lookup(context.Background(), host)
+	}}}
+	ctx := context.Background()
 
-	got, err := resolveEndpointAll("ddns.example:51820")
+	got, _, err := s.resolveEndpointAll(ctx, "ddns.example:51820")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,15 +175,51 @@ func TestResolveEndpointAll(t *testing.T) {
 	}
 
 	// a literal address is authoritative and must not hit the resolver
-	got, err = resolveEndpointAll("203.0.113.7:51820")
+	got, res, err := s.resolveEndpointAll(ctx, "203.0.113.7:51820")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0] != "203.0.113.7:51820" {
 		t.Fatalf("literal candidates = %v", got)
 	}
+	if res.Server != "literal" {
+		t.Fatalf("literal server = %q", res.Server)
+	}
 	if calls != 1 {
 		t.Fatalf("resolver called %d times, want 1", calls)
+	}
+}
+
+// A peer with no endpoint is re-filled every tick; that must not reset the
+// periodic DNS clock for every other hostname peer.
+func TestEndpointJobsFillDoesNotStarvePeriodic(t *testing.T) {
+	pubA, _ := wgconf.GeneratePrivateKey()
+	pubB, _ := wgconf.GeneratePrivateKey()
+	i := &inst{conf: &wgconf.Config{Peers: []wgconf.Peer{
+		{PublicKey: pubA, Endpoint: "a.example:51820"},
+		{PublicKey: pubB, Endpoint: "b.example:51820"},
+	}}}
+	i.status = &uapi.DeviceStatus{Peers: []uapi.PeerStatus{
+		{PublicKey: pubA}, // no endpoint: needs a fill
+		{PublicKey: pubB, Endpoint: "203.0.113.9:51820", LastHandshake: time.Now()},
+	}}
+	i.lastEPCheck = time.Now() // no periodic check due
+	jobs, periodic := endpointJobs(i)
+	if periodic {
+		t.Fatal("periodic must be false right after a check")
+	}
+	if len(jobs) != 1 || jobs[0].peerKey != pubA {
+		t.Fatalf("jobs = %+v, want only the endpoint-less peer", jobs)
+	}
+
+	// Once the periodic interval has passed both peers are due.
+	i.lastEPCheck = time.Now().Add(-endpointRecheck - time.Second)
+	jobs, periodic = endpointJobs(i)
+	if !periodic {
+		t.Fatal("periodic must be true after the interval")
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("jobs = %+v, want both peers", jobs)
 	}
 }
 
@@ -211,5 +262,17 @@ func TestEndpointCheckDue(t *testing.T) {
 	i.lastEPCheck = now.Add(-endpointRecheck - time.Second)
 	if !i.endpointCheckDue(status(time.Time{})) {
 		t.Error("periodic re-check should be due")
+	}
+
+	// A keepalive-enabled peer that has never handshaked after the grace
+	// period is the signature of a dead first DNS answer: use the fast lane
+	// so a multi-answer record gets a chance to rotate.
+	i.conf.Peers[0].PersistentKeepalive = 25
+	i.startedAt = now.Add(-endpointNoHandshakeGrace - time.Minute)
+	i.lastEPCheck = now.Add(-endpointFastRecheck - time.Second)
+	never := status(time.Time{})
+	never.Peers[0].TxBytes = 4096
+	if !i.endpointCheckDue(never) {
+		t.Error("a keepalive peer that never handshaked should open the fast lane")
 	}
 }

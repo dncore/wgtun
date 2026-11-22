@@ -1,17 +1,16 @@
+//go:build darwin
+
 package daemon
 
 import (
 	"fmt"
-	"net/netip"
 	"os/exec"
 	"strconv"
 	"strings"
-
-	"github.com/dncore/wgtun/internal/wgconf"
 )
 
-// netsetup applies addresses, MTU and routes to a utun interface, mirroring
-// what wg-quick does on darwin:
+// setupNetwork applies addresses, MTU and routes to a utun interface,
+// mirroring what wg-quick does on darwin:
 //
 //	ifconfig utunN inet <addr/prefix> <addr> alias   (per Address)
 //	ifconfig utunN mtu <mtu>
@@ -20,7 +19,8 @@ import (
 //
 // 0.0.0.0/0 and ::/0 are split into two /1s so the default route is not
 // overridden (same trick wg-quick uses).
-func netsetup(tun string, conf *wgconf.Config) error {
+func (s *Supervisor) setupNetwork(i *inst) error {
+	tun, conf := i.tun, i.conf
 	for _, p := range conf.Interface.Addresses {
 		proto := "inet"
 		if p.Addr().Is6() {
@@ -57,17 +57,6 @@ func netsetup(tun string, conf *wgconf.Config) error {
 		}
 	}
 	return nil
-}
-
-// splitDefaultRoute expands a default route into two half-routes.
-func splitDefaultRoute(p netip.Prefix) []string {
-	switch p.String() {
-	case "0.0.0.0/0":
-		return []string{"0.0.0.0/1", "128.0.0.0/1"}
-	case "::/0":
-		return []string{"::/1", "8000::/1"}
-	}
-	return []string{p.String()}
 }
 
 // runCmd runs a setup command; stderr is captured into the error.

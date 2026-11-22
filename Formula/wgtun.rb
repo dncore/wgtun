@@ -2,7 +2,7 @@
 # (see .goreleaser.yaml, brew section) and lives in dncore/homebrew-tap.
 # This file documents the shape; do not edit manually on release.
 class Wgtun < Formula
-  desc "WireGuard orchestrator: Go TUI + root launchd daemon for wireguard-go"
+  desc "WireGuard orchestrator: Go TUI + root launchd/systemd daemon"
   homepage "https://github.com/dncore/wgtun"
   license "MIT"
   url "https://github.com/dncore/wgtun/releases/download/v0.1.0/wgtun_0.1.0_darwin_arm64.zip"

@@ -1,3 +1,5 @@
+//go:build darwin
+
 package daemon
 
 import (
@@ -7,9 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/dncore/wgtun/internal/paths"
@@ -18,21 +18,18 @@ import (
 // launchdLabel is the system daemon label under which wgtun runs.
 const launchdLabel = "com.wgtun.daemon"
 
-// InstallLaunchd writes the LaunchDaemon plist and load it.
+// installService writes the LaunchDaemon plist and loads it.
 // Must run as root.
-func InstallLaunchd() error {
+func installService() error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("must run as root (sudo)")
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
 	}
 	// Deliberately not EvalSymlinks'd: Homebrew installs bin/wgtun as a symlink
 	// into Cellar/wgtun/<version>/bin/, and baking that versioned target into
 	// the plist leaves the LaunchDaemon unable to exec after `brew upgrade`
-	// removes the directory — silently, until the next boot. os.Executable()
-	// returns the symlink as invoked (absolute), which survives upgrades.
+	// removes the directory — silently, until the next boot. ExecutablePath
+	// keeps the symlink as invoked, which survives upgrades.
+	exe := paths.ExecutablePath()
 	if err := os.MkdirAll(paths.LogDir, 0o755); err != nil {
 		return err
 	}
@@ -52,9 +49,13 @@ func InstallLaunchd() error {
 	if err := os.WriteFile(dst, []byte(plist), 0o644); err != nil {
 		return err
 	}
+	// A service another tool disabled would make bootstrap fail with
+	// "Service is disabled"; clearing the flag is part of repair.
+	_ = launchctl("enable", "system/"+launchdLabel)
 	if err := launchctl("bootstrap", "system", dst); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
+	persistServiceEnv(serviceEnv())
 	fmt.Printf("installed and started %s (%s daemon)\n", launchdLabel, exe)
 	if pairs, _ := launchdEnv(); len(pairs) > 0 {
 		fmt.Printf("environment: %s\n", strings.Join(pairs, " "))
@@ -62,8 +63,8 @@ func InstallLaunchd() error {
 	return nil
 }
 
-// UninstallLaunchd removes the LaunchDaemon and the tunnels it was running.
-func UninstallLaunchd() error {
+// uninstallService removes the LaunchDaemon and the tunnels it was running.
+func uninstallService() error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("must run as root (sudo)")
 	}
@@ -81,97 +82,23 @@ func UninstallLaunchd() error {
 	return nil
 }
 
-// killOrphans terminates the wireguard-go processes a previous daemon left
-// behind and clears their runtime files.
-func killOrphans() {
-	entries, err := os.ReadDir(paths.RunDir)
-	if err != nil {
-		return
-	}
-	tuns := make([]string, 0, len(entries))
-	killed := 0
-	for _, e := range entries {
-		dir := filepath.Join(paths.RunDir, e.Name())
-		if tun, err := os.ReadFile(filepath.Join(dir, "tun.name")); err == nil {
-			if name := strings.TrimSpace(string(tun)); name != "" {
-				tuns = append(tuns, name)
-			}
-		}
-		if pid := readPidFile(filepath.Join(dir, "pid")); pid > 0 && isWireGuardGo(pid) {
-			// sigterm only: never kill a pid we cannot positively identify
-			syscall.Kill(pid, syscall.SIGTERM)
-			killed++
-		}
-		os.RemoveAll(dir)
-	}
-	if killed > 0 {
-		time.Sleep(300 * time.Millisecond) // let the device processes exit
-	}
-	for _, tun := range tuns {
-		os.Remove(filepath.Join(paths.WireGuardSockDir, tun+".sock"))
-	}
-	if killed > 0 {
-		fmt.Printf("stopped %d wireguard-go instance(s)\n", killed)
-	}
-}
-
-// readPidFile reads a daemon-written pid file, 0 when absent or malformed.
-func readPidFile(path string) int {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return 0
-	}
-	return pid
-}
-
-// isWireGuardGo reports whether a pid currently runs wireguard-go, so the
-// daemon never signals a pid that was recycled by another process. It is used
-// both by the uninstall reaper and by cleanupLocked, which runs as root.
-func isWireGuardGo(pid int) bool {
-	out, err := exec.Command("/bin/ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
-	if err != nil {
-		return false
-	}
-	comm := strings.TrimSpace(string(out))
-	if comm == "" {
-		return false
-	}
-	// The configured path may be a custom build; the basename check covers a
-	// renamed installation of the binary we actually launch.
-	return comm == paths.WireGuardGo || strings.Contains(filepath.Base(comm), "wireguard-go")
-}
-
-// launchdEnvKeys are the environment variables baked into the plist when they
-// are set while installing. `daemon --install` regenerates the plist from this
-// template, so anything set by hand there would be silently dropped on the next
-// install or upgrade.
-var launchdEnvKeys = []string{
-	"WGTUN_RECONCILE_INTERVAL",
-}
-
 // launchdEnv returns the KEY=VALUE pairs to bake into the plist, in a stable
 // order, and the XML fragment declaring them (empty when nothing is set).
+// serviceEnv merges the current environment with what the previous install
+// saved, so a repair does not drop settings made by the original install.
 func launchdEnv() ([]string, string) {
-	var pairs []string
+	pairs := serviceEnv()
+	if len(pairs) == 0 {
+		return nil, ""
+	}
 	var frag strings.Builder
-	for _, k := range launchdEnvKeys {
-		v := os.Getenv(k)
-		if v == "" {
-			continue
-		}
-		pairs = append(pairs, k+"="+v)
+	for _, kv := range pairs {
+		k, v, _ := strings.Cut(kv, "=")
 		frag.WriteString("\t\t<key>")
 		xmlEscape(&frag, k)
 		frag.WriteString("</key>\n\t\t<string>")
 		xmlEscape(&frag, v)
 		frag.WriteString("</string>\n")
-	}
-	if len(pairs) == 0 {
-		return nil, ""
 	}
 	return pairs, "\t<key>EnvironmentVariables</key>\n\t<dict>\n" + frag.String() + "\t</dict>\n"
 }

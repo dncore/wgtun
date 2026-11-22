@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/table"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/dncore/wgtun/internal/api"
@@ -31,9 +31,9 @@ type instancesModel struct {
 	detail       string           // error text of the last detail fetch
 	detailResp   *wire.StatusResp // live status shown in the detail pane
 	confirmName  string           // instance pending delete confirmation; empty = none
-	confirmAct  tea.Cmd
-	editing     bool // editor is open
-	editor      *editorModel
+	confirmAct   tea.Cmd
+	editing      bool // editor is open
+	editor       *editorModel
 }
 
 func newInstances() *instancesModel {
@@ -159,8 +159,8 @@ func (m *instancesModel) fetchDetail() tea.Cmd {
 }
 
 type detailDoneMsg struct {
-	text string            // error text when resp is nil
-	resp *wire.StatusResp  // live status, rendered at view time (for i18n)
+	text string           // error text when resp is nil
+	resp *wire.StatusResp // live status, rendered at view time (for i18n)
 }
 
 func (m *instancesModel) renderDetail(lang i18n.Lang, resp *wire.StatusResp) string {
@@ -190,8 +190,45 @@ func (m *instancesModel) renderDetail(lang i18n.Lang, resp *wire.StatusResp) str
 		for _, ip := range p.AllowedIPs {
 			b += fmt.Sprintf("   allowed-ips %s\n", ip)
 		}
+		if line := renderEndpointDiag(resp.Endpoints, p.PublicKey); line != "" {
+			b += line + "\n"
+		}
 	}
 	return strings.TrimRight(b, "\n")
+}
+
+// renderEndpointDiag renders the daemon's last DNS check for one peer. This is
+// the answer to "is DDNS tracking actually running?" without opening the log.
+func renderEndpointDiag(diags []wire.EndpointDiag, peerKey string) string {
+	for _, d := range diags {
+		if d.PeerKey != peerKey {
+			continue
+		}
+		parts := []string{}
+		if !d.CheckedAt.IsZero() {
+			parts = append(parts, "checked "+humanDur(time.Since(d.CheckedAt).Round(time.Second))+" ago")
+		}
+		if d.Resolver != "" {
+			parts = append(parts, "via "+d.Resolver)
+		}
+		if len(d.Candidates) > 0 {
+			parts = append(parts, strings.Join(d.Candidates, ", "))
+		}
+		if d.TTLSec > 0 {
+			parts = append(parts, fmt.Sprintf("ttl %ds", d.TTLSec))
+		}
+		if d.FakeIP != "" {
+			parts = append(parts, "fake-IP "+d.FakeIP)
+		}
+		if d.Decision != "" {
+			parts = append(parts, d.Decision)
+		}
+		if d.Error != "" {
+			parts = append(parts, "error: "+d.Error)
+		}
+		return "   dns " + strings.Join(parts, " · ")
+	}
+	return ""
 }
 
 func shortKey(k string) string {

@@ -38,13 +38,18 @@ type notRunning struct{ name string }
 
 func (e *notRunning) Error() string { return "instance not running: " + e.name }
 
-func (f *fakeSup) Conf(name string) (string, error) { return f.confs[name], nil }
+func (f *fakeSup) Conf(name string) (string, error)              { return f.confs[name], nil }
+func (f *fakeSup) EndpointDiags(name string) []wire.EndpointDiag { return nil }
+func (f *fakeSup) ResolverInfo() string                          { return "system" }
+func (f *fakeSup) LastReconcile() time.Time                      { return time.Now() }
+func (f *fakeSup) LastReconcileDuration() time.Duration          { return 0 }
+func (f *fakeSup) LastBeat() time.Time                           { return time.Now() }
 func (f *fakeSup) DevicePublicKey(name string) string {
 	return "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 }
-func (f *fakeSup) Start(name string) error          { f.lastAct = "up:" + name; return nil }
-func (f *fakeSup) Stop(name string) error           { f.lastAct = "down:" + name; return nil }
-func (f *fakeSup) Restart(name string) error        { f.lastAct = "restart:" + name; return nil }
+func (f *fakeSup) Start(name string) error   { f.lastAct = "up:" + name; return nil }
+func (f *fakeSup) Stop(name string) error    { f.lastAct = "down:" + name; return nil }
+func (f *fakeSup) Restart(name string) error { f.lastAct = "restart:" + name; return nil }
 func (f *fakeSup) SetEnabled(name string, en bool) error {
 	f.enabled[name] = en
 	return nil

@@ -22,6 +22,9 @@ func main() {
 		case "import":
 			runImport(os.Args[2:])
 			return
+		case "status":
+			runStatus()
+			return
 		case "help", "-h", "--help":
 			usage()
 			return
@@ -41,9 +44,10 @@ func usage() {
 
 Usage:
   wgtun                 start the TUI (requires the daemon to be running)
-  wgtun daemon          run the root daemon (foreground; launchd runs this)
-  wgtun daemon --install    install the LaunchDaemon plist (sudo)
-  wgtun daemon --uninstall  remove the LaunchDaemon plist (sudo)
+  wgtun daemon          run the root daemon (foreground; the service runs this)
+  wgtun daemon --install    install and start the service (launchd/systemd, sudo)
+  wgtun daemon --uninstall  stop and remove the service (sudo)
+  wgtun status          daemon health + endpoint DNS diagnostics
   wgtun import <file.conf>  import a WireGuard config as an instance
   wgtun version         print version
 `)

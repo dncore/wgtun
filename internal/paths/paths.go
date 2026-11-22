@@ -5,9 +5,10 @@ package paths
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 )
-
 
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -16,25 +17,33 @@ func env(key, def string) string {
 	return def
 }
 
-var (
-	// ConfDir holds the wg-quick compatible *.conf files (one instance per file).
-	ConfDir = env("WGTUN_CONF_DIR", "/usr/local/etc/wireguard")
-	// StateDir holds desired-state persistence.
-	StateDir = env("WGTUN_STATE_DIR", "/var/lib/wgtun")
-	// RunDir holds per-instance runtime dirs (UAPI socket, tun name, pid).
-	RunDir = env("WGTUN_RUN_DIR", "/var/run/wgtun")
-	// LogDir holds daemon logs.
-	LogDir = env("WGTUN_LOG_DIR", "/var/log/wgtun")
-	// SocketPath is the Unix socket shared by daemon and TUI.
-	SocketPath = env("WGTUN_SOCK", "/var/run/wgtun.sock")
-	// WireGuardGo is the wireguard-go binary the daemon orchestrates.
-	WireGuardGo = env("WGTUN_WIREGUARD_GO", "/opt/homebrew/bin/wireguard-go")
-	// WireGuardSockDir is where wireguard-go itself creates its UAPI
-	// sockets (<tun>.sock). Upstream hardcodes /var/run/wireguard on
-	// darwin (there is no WG_UAPI_DIR); the directory is only overridable
-	// here for tests.
-	WireGuardSockDir = env("WGTUN_WG_SOCK_DIR", "/var/run/wireguard")
-)
+// SocketGroup returns the group that may connect to the control socket.
+// WGTUN_SOCKET_GROUP wins; the installer bakes it into the service unit so a
+// non-root TUI can reach a root daemon. Empty means root-only.
+func SocketGroup() string { return os.Getenv("WGTUN_SOCKET_GROUP") }
+
+// ExecutablePath returns the path the binary was invoked as, preserving
+// symlinks where possible. os.Executable() resolves symlinks on Linux
+// (/proc/self/exe), and baking a versioned Cellar/... target into a service
+// unit leaves it unable to exec after the next upgrade; argv[0] keeps the
+// stable symlink path instead.
+func ExecutablePath() string {
+	if arg0 := os.Args[0]; arg0 != "" {
+		if strings.ContainsRune(arg0, os.PathSeparator) {
+			if abs, err := filepath.Abs(arg0); err == nil {
+				return abs
+			}
+		}
+		if p, err := exec.LookPath(arg0); err == nil {
+			return p
+		}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return os.Args[0]
+	}
+	return exe
+}
 
 // StateFile is the desired-state JSON path.
 func StateFile() string { return filepath.Join(StateDir, "state.json") }

@@ -27,30 +27,35 @@ const (
 	TabSettings  = "tab.settings"
 
 	// dashboard
-	DashboardTitle  = "dashboard.title"
-	DashboardSub    = "dashboard.subtitle"
-	StatRunning     = "stat.running"
-	StatTotal       = "stat.total"
-	StatOnline      = "stat.online"
-	StatTraffic     = "stat.traffic"
-	CardUp          = "card.up"
-	CardDown        = "card.down"
-	CardHandshake   = "card.handshake"
-	CardRx          = "card.rx"
-	CardTx          = "card.tx"
-	CardPeers       = "card.peers"
-	CardEndpoint    = "card.endpoint"
-	CardTun         = "card.tun"
-	CardListen      = "card.listen"
-	CardPubKey      = "card.pubKey"
-	CardAllowed     = "card.allowed"
-	CardNone        = "card.none"
-	Never           = "time.never"
-	HandshakeNow    = "time.handshakeNow"
-	HandshakeAgo    = "time.handshakeAgo" // args: duration
-	NoInstances     = "dashboard.noInstances"
-	WgGoMissing     = "settings.wireguardGoMissing"
-	DaemonOffline   = "daemon.offline"
+	DashboardTitle     = "dashboard.title"
+	DashboardSub       = "dashboard.subtitle"
+	StatRunning        = "stat.running"
+	StatTotal          = "stat.total"
+	StatOnline         = "stat.online"
+	StatTraffic        = "stat.traffic"
+	CardUp             = "card.up"
+	CardDown           = "card.down"
+	CardHandshake      = "card.handshake"
+	CardRx             = "card.rx"
+	CardTx             = "card.tx"
+	CardPeers          = "card.peers"
+	CardEndpoint       = "card.endpoint"
+	CardTun            = "card.tun"
+	CardListen         = "card.listen"
+	CardPubKey         = "card.pubKey"
+	CardAllowed        = "card.allowed"
+	CardNone           = "card.none"
+	Never              = "time.never"
+	HandshakeNow       = "time.handshakeNow"
+	HandshakeAgo       = "time.handshakeAgo" // args: duration
+	NoInstances        = "dashboard.noInstances"
+	WgGoMissing        = "settings.wireguardGoMissing"
+	DaemonOffline      = "daemon.offline"
+	DaemonOfflineFor   = "daemon.offlineFor" // args: duration
+	DaemonRepairHint   = "daemon.repairHint"
+	DaemonRunning      = "daemon.running"
+	RepairRunning      = "repair.running"
+	RepairFailed       = "repair.failed" // args: error
 	DaemonReconnecting = "daemon.reconnecting"
 
 	// instances
@@ -85,50 +90,50 @@ const (
 	InstanceOffline = "inst.offlineDetail"
 
 	// editor
-	EditorTitle       = "editor.title"
-	EditorNewTitle    = "editor.newTitle"
-	FieldName         = "editor.fieldName"
-	FieldPrivateKey   = "editor.fieldPrivateKey"
-	FieldAddress      = "editor.fieldAddress"
-	FieldListenPort   = "editor.fieldListenPort"
-	FieldMTU          = "editor.fieldMTU"
-	FieldDNS          = "editor.fieldDNS"
-	FieldPeerPublic   = "editor.fieldPeerPublic"
-	FieldPeerAllowed  = "editor.fieldPeerAllowed"
-	FieldPeerEndpoint = "editor.fieldPeerEndpoint"
+	EditorTitle        = "editor.title"
+	EditorNewTitle     = "editor.newTitle"
+	FieldName          = "editor.fieldName"
+	FieldPrivateKey    = "editor.fieldPrivateKey"
+	FieldAddress       = "editor.fieldAddress"
+	FieldListenPort    = "editor.fieldListenPort"
+	FieldMTU           = "editor.fieldMTU"
+	FieldDNS           = "editor.fieldDNS"
+	FieldPeerPublic    = "editor.fieldPeerPublic"
+	FieldPeerAllowed   = "editor.fieldPeerAllowed"
+	FieldPeerEndpoint  = "editor.fieldPeerEndpoint"
 	FieldPeerKeepalive = "editor.fieldPeerKeepalive"
-	FieldPeerPSK      = "editor.fieldPeerPSK"
-	KeyGenKey         = "key.genKey"
-	KeyAddPeer        = "key.addPeer"
-	KeyDelPeer        = "key.delPeer"
-	KeySave           = "key.save"
-	KeyCancel         = "key.cancel"
-	KeyForce          = "key.force"
-	EditorSaved       = "editor.saved"
+	FieldPeerPSK       = "editor.fieldPeerPSK"
+	KeyGenKey          = "key.genKey"
+	KeyAddPeer         = "key.addPeer"
+	KeyDelPeer         = "key.delPeer"
+	KeySave            = "key.save"
+	KeyCancel          = "key.cancel"
+	KeyForce           = "key.force"
+	EditorSaved        = "editor.saved"
 	EditorSavedRestart = "editor.savedNeedRestart"
-	EditorError       = "editor.error"
-	Peers             = "editor.peers"
-	PeerListHint      = "editor.peerHint"
-	ForceHint         = "editor.forceHint"
-	ConflictFound     = "editor.conflictFound" // args: err
-	NoPeers           = "editor.noPeers"
+	EditorError        = "editor.error"
+	Peers              = "editor.peers"
+	PeerListHint       = "editor.peerHint"
+	ForceHint          = "editor.forceHint"
+	ConflictFound      = "editor.conflictFound" // args: err
+	NoPeers            = "editor.noPeers"
 
 	// logs
-	LogsTitle       = "logs.title"
-	LogsAll         = "logs.all"
-	LogsFollow      = "logs.follow"
-	LogsPause       = "logs.pause"
-	LogsFilter      = "logs.filter"
-	LogsNoEvents    = "logs.noEvents"
-	KeyFollow       = "key.follow"
-	KeyClearFilter  = "key.clearFilter"
-	KeyPaste        = "key.paste"
-	PasteHint       = "editor.pasteHint"
-	FilterCleared   = "logs.filterCleared"
-	LevelDebug      = "level.debug"
-	LevelInfo       = "level.info"
-	LevelWarn       = "level.warn"
-	LevelError      = "level.error"
+	LogsTitle      = "logs.title"
+	LogsAll        = "logs.all"
+	LogsFollow     = "logs.follow"
+	LogsPause      = "logs.pause"
+	LogsFilter     = "logs.filter"
+	LogsNoEvents   = "logs.noEvents"
+	KeyFollow      = "key.follow"
+	KeyClearFilter = "key.clearFilter"
+	KeyPaste       = "key.paste"
+	PasteHint      = "editor.pasteHint"
+	FilterCleared  = "logs.filterCleared"
+	LevelDebug     = "level.debug"
+	LevelInfo      = "level.info"
+	LevelWarn      = "level.warn"
+	LevelError     = "level.error"
 
 	// settings
 	SettingsTitle     = "settings.title"
@@ -140,18 +145,22 @@ const (
 	SettingsDaemonOff = "settings.daemonOffline"
 	SettingsVersion   = "settings.version"
 	SettingsWgGo      = "settings.wireguardGo"
+	SettingsResolver  = "settings.resolver"
+	SettingsService   = "settings.service"
+	SettingsBackend   = "settings.backend"
 	SettingsUptime    = "settings.uptime"
 	SettingsSocket    = "settings.socket"
 	SettingsConfDir   = "settings.confDir"
 	SettingsRunDir    = "settings.runDir"
 	SettingsLogDir    = "settings.logDir"
 	KeyQuit           = "key.quit"
+	KeyRepair         = "key.repair"
 	KeySwitchLang     = "key.switchLang"
 	KeyHelp           = "key.help"
 
 	// status line
-	StatusBusy      = "status.busy"
-	StatusDone      = "status.done"
+	StatusBusy = "status.busy"
+	StatusDone = "status.done"
 
 	// fmt helpers
 	BytesHuman = "fmt.bytes" // done in code, no key needed
@@ -166,9 +175,12 @@ var tables = map[Lang]map[string]string{
 		CardPeers: "peers", CardEndpoint: "endpoint", CardTun: "tun",
 		CardListen: "listen", CardPubKey: "pub", CardAllowed: "allowed", CardNone: "—",
 		Never: "never", HandshakeNow: "just now", HandshakeAgo: "%s ago",
-		NoInstances: "No instances yet — press n in the Instances tab to create one.\nIn the editor, ctrl+v pastes an existing WireGuard config; alternatively drop\nany .conf file into the WireGuard config directory and it is imported automatically.",
-		WgGoMissing: "wireguard-go not found — install it with: brew install wireguard-go",
-		DaemonOffline: "daemon offline", DaemonReconnecting: "reconnecting…",
+		NoInstances:   "No instances yet — press n in the Instances tab to create one.\nIn the editor, ctrl+v pastes an existing WireGuard config; alternatively drop\nany .conf file into the WireGuard config directory and it is imported automatically.",
+		WgGoMissing:   "wireguard-go not found — install it with: brew install wireguard-go",
+		DaemonOffline: "daemon offline", DaemonOfflineFor: "daemon unreachable for %s",
+		DaemonRepairHint: "press R to repair", DaemonRunning: "daemon is running",
+		RepairRunning: "waiting for authorization…",
+		RepairFailed: "repair failed: %v", DaemonReconnecting: "reconnecting…",
 		InstTitle: "Instances", InstName: "NAME", InstAutostart: "BOOT", InstState: "STATE", InstPort: "PORT",
 		InstPeers: "PEERS", InstOnline: "ONLINE", InstUptime: "UPTIME",
 		InstRunning: "running", InstStopped: "stopped",
@@ -194,13 +206,13 @@ var tables = map[Lang]map[string]string{
 		KeyPaste:      "ctrl+v paste config",
 		PasteHint:     "Paste a full WireGuard config ([Interface] + [Peer] sections), then ctrl+s applies it to the form. esc cancels.",
 		FilterCleared: "filters cleared, reloaded",
-		LevelDebug: "DEBUG", LevelInfo: "INFO", LevelWarn: "WARN", LevelError: "ERROR",
+		LevelDebug:    "DEBUG", LevelInfo: "INFO", LevelWarn: "WARN", LevelError: "ERROR",
 		SettingsTitle: "Settings", SettingsLang: "Language", SettingsLangDesc: "switch UI language",
 		LangEn: "English", LangZh: "中文",
 		SettingsDaemon: "Daemon", SettingsDaemonOff: "daemon offline — start it with: sudo wgtun daemon --install",
-		SettingsVersion: "Version", SettingsWgGo: "wireguard-go", SettingsUptime: "Uptime", SettingsSocket: "Socket",
+		SettingsVersion: "Version", SettingsWgGo: "wireguard-go", SettingsResolver: "Endpoint DNS", SettingsService: "Service", SettingsBackend: "Backend", SettingsUptime: "Uptime", SettingsSocket: "Socket",
 		SettingsConfDir: "Config dir", SettingsRunDir: "Run dir", SettingsLogDir: "Log dir",
-		KeyQuit: "quit", KeySwitchLang: "switch language", KeyHelp: "help",
+		KeyQuit: "quit", KeyRepair: "repair daemon", KeySwitchLang: "switch language", KeyHelp: "help",
 		StatusBusy: "working…", StatusDone: "done",
 	},
 	Zh: {
@@ -211,9 +223,12 @@ var tables = map[Lang]map[string]string{
 		CardPeers: "peer", CardEndpoint: "端点", CardTun: "接口",
 		CardListen: "监听", CardPubKey: "公钥", CardAllowed: "允许", CardNone: "—",
 		Never: "从未", HandshakeNow: "刚刚", HandshakeAgo: "%s 前",
-		NoInstances: "还没有实例 —— 在「实例」页按 n 新建。\n编辑器里 ctrl+v 可粘贴现有的 WireGuard 配置；\n或把任意 .conf 文件放进 WireGuard 配置目录，会自动导入。",
-		WgGoMissing: "未找到 wireguard-go —— 请安装: brew install wireguard-go",
-		DaemonOffline: "daemon 离线", DaemonReconnecting: "重连中…",
+		NoInstances:   "还没有实例 —— 在「实例」页按 n 新建。\n编辑器里 ctrl+v 可粘贴现有的 WireGuard 配置；\n或把任意 .conf 文件放进 WireGuard 配置目录，会自动导入。",
+		WgGoMissing:   "未找到 wireguard-go —— 请安装: brew install wireguard-go",
+		DaemonOffline: "daemon 离线", DaemonOfflineFor: "daemon 已不可达 %s",
+		DaemonRepairHint: "按 R 修复", DaemonRunning: "daemon 正在运行",
+		RepairRunning: "等待系统授权…",
+		RepairFailed: "修复失败: %v", DaemonReconnecting: "重连中…",
 		InstTitle: "实例", InstName: "名称", InstAutostart: "自启", InstState: "状态", InstPort: "端口",
 		InstPeers: "peer", InstOnline: "在线", InstUptime: "运行时长",
 		InstRunning: "运行中", InstStopped: "已停止",
@@ -239,13 +254,13 @@ var tables = map[Lang]map[string]string{
 		KeyPaste:      "ctrl+v 粘贴配置",
 		PasteHint:     "粘贴完整 WireGuard 配置（[Interface] + [Peer] 段），ctrl+s 应用到表单，esc 取消。",
 		FilterCleared: "过滤器已清除，已重新加载",
-		LevelDebug: "调试", LevelInfo: "信息", LevelWarn: "警告", LevelError: "错误",
+		LevelDebug:    "调试", LevelInfo: "信息", LevelWarn: "警告", LevelError: "错误",
 		SettingsTitle: "设置", SettingsLang: "语言", SettingsLangDesc: "切换界面语言",
 		LangEn: "English", LangZh: "中文",
 		SettingsDaemon: "Daemon", SettingsDaemonOff: "daemon 离线 — 用 sudo wgtun daemon --install 启动",
-		SettingsVersion: "版本", SettingsWgGo: "wireguard-go", SettingsUptime: "运行时长", SettingsSocket: "Socket",
+		SettingsVersion: "版本", SettingsWgGo: "wireguard-go", SettingsResolver: "端点 DNS", SettingsService: "服务", SettingsBackend: "实现", SettingsUptime: "运行时长", SettingsSocket: "Socket",
 		SettingsConfDir: "配置目录", SettingsRunDir: "运行目录", SettingsLogDir: "日志目录",
-		KeyQuit: "退出", KeySwitchLang: "切换语言", KeyHelp: "帮助",
+		KeyQuit: "退出", KeyRepair: "修复 daemon", KeySwitchLang: "切换语言", KeyHelp: "帮助",
 		StatusBusy: "处理中…", StatusDone: "完成",
 	},
 }

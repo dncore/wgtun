@@ -13,14 +13,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/dncore/wgtun/internal/logs"
 	"github.com/dncore/wgtun/internal/paths"
+	"github.com/dncore/wgtun/internal/resolver"
 	"github.com/dncore/wgtun/internal/state"
 	"github.com/dncore/wgtun/internal/uapi"
 	"github.com/dncore/wgtun/internal/wgconf"
@@ -45,6 +46,14 @@ const (
 	// counts as unreachable. WireGuard rekeys every ~2min, so 150s means no
 	// traffic could complete for at least one rekey period.
 	handshakeStaleAfter = 150 * time.Second
+	// endpointNoHandshakeGrace is how long a keepalive-enabled peer may go
+	// without ever handshaking before it counts as unreachable. Without this a
+	// peer whose first DNS answer is dead would sit on it forever, because the
+	// "stale handshake" rule only applies to peers that have handshaken.
+	endpointNoHandshakeGrace = 2 * time.Minute
+	// endpointRotateEvery rate-limits trying a different address from a
+	// multi-answer record while the current one is unhealthy.
+	endpointRotateEvery = 60 * time.Second
 )
 
 // inst is the runtime view of one configured instance.
@@ -54,10 +63,15 @@ type inst struct {
 	conf     *wgconf.Config
 
 	pid       int
-	tun       string // utunN
+	tun       string // utunN / wgtun-<name>
+	active    bool   // device exists (kernel devices have no pid)
 	adopted   bool   // true when the process was started by a previous daemon
 	startedAt time.Time
 	devicePub string // base64 public key derived from the config's private key
+
+	// pins are endpoint host routes added so the tunnel's own routes cannot
+	// capture the encrypted WireGuard packets (full-tunnel configs).
+	pins []netip.Addr
 
 	restarts    []time.Time // restart attempts for backoff
 	nextAttempt time.Time
@@ -72,12 +86,33 @@ type inst struct {
 	// peerRetry counts consecutive endpoint fills for peers the device has not
 	// accepted yet, so a refused peer cannot be re-pushed forever
 	peerRetry map[string]int
+	// peerLastSwitch rate-limits address rotation within a multi-answer record.
+	peerLastSwitch map[string]time.Time
+	// epDiag keeps the last DNS observation per peer for the status API.
+	epDiag map[string]*endpointDiag
+	// fakeWarn deduplicates the fake-IP warning per endpoint/range.
+	fakeWarn map[string]time.Time
 	// confSig is the config file revision this instance was parsed from, so an
 	// unchanged file is not re-read and re-parsed on every reconcile tick
 	confSig fileSig
 }
 
-func (i *inst) running() bool { return i.pid != 0 }
+// endpointDiag is the daemon's last endpoint-resolution observation for one
+// peer. It is copied into wire.EndpointDiag for the API.
+type endpointDiag struct {
+	PeerKey    string
+	Config     string
+	Live       string
+	CheckedAt  time.Time
+	Candidates []string
+	TTLSec     int64
+	Resolver   string
+	FakeIP     string
+	Decision   string
+	Error      string
+}
+
+func (i *inst) running() bool { return i.active || i.pid != 0 }
 
 // Supervisor owns all instances. All public methods are safe concurrently;
 // lifecycle operations are serialized.
@@ -89,8 +124,16 @@ type Supervisor struct {
 	// file is reported once per edit instead of once per tick.
 	badConf map[string]fileSig
 
-	st *state.Store
-	ev *logs.Store
+	st  *state.Store
+	ev  *logs.Store
+	res resolver.Resolver // endpoint hostname resolver (system/udp/doh)
+
+	// Heartbeat for the self-watchdog and /state. Atomic because the watchdog
+	// and the API read them without taking s.mu (which a hung reconcile would
+	// hold forever — exactly the case they exist to detect).
+	lastBeat         atomic.Int64 // UnixNano of the last progress point
+	lastReconcile    atomic.Int64 // UnixNano of the last completed Reconcile
+	lastReconcileDur atomic.Int64 // duration of the last completed Reconcile
 }
 
 // fileSig identifies a config file revision cheaply: enough to notice an edit
@@ -120,11 +163,55 @@ func statSig(path string) (fileSig, error) {
 
 // New creates a supervisor.
 func New(st *state.Store, ev *logs.Store) *Supervisor {
-	return &Supervisor{
+	s := &Supervisor{
 		insts: map[string]*inst{},
 		st:    st,
 		ev:    ev,
 	}
+	s.res = newEndpointResolver(ev)
+	now := time.Now().UnixNano()
+	s.lastBeat.Store(now)
+	s.lastReconcile.Store(now)
+	return s
+}
+
+// beat records that the reconcile loop is making progress.
+func (s *Supervisor) beat() { s.lastBeat.Store(time.Now().UnixNano()) }
+
+// LastBeat is the time of the last observed progress in the reconcile loop.
+func (s *Supervisor) LastBeat() time.Time { return time.Unix(0, s.lastBeat.Load()) }
+
+// LastReconcile is the time the last full reconcile pass completed.
+func (s *Supervisor) LastReconcile() time.Time { return time.Unix(0, s.lastReconcile.Load()) }
+
+// LastReconcileDuration is how long the last full pass took.
+func (s *Supervisor) LastReconcileDuration() time.Duration {
+	return time.Duration(s.lastReconcileDur.Load())
+}
+
+// newEndpointResolver builds the resolver selected by
+// WGTUN_ENDPOINT_RESOLVER. A bad value is a configuration error worth
+// reporting, but it must not keep the daemon (and therefore the tunnels) from
+// starting, so fall back to the system resolver.
+func newEndpointResolver(ev *logs.Store) resolver.Resolver {
+	spec := os.Getenv("WGTUN_ENDPOINT_RESOLVER")
+	r, err := resolver.New(spec)
+	if err != nil {
+		ev.Error("", "ignoring WGTUN_ENDPOINT_RESOLVER=%q: %v (using system resolver)", spec, err)
+		r, _ = resolver.New("system")
+	}
+	if spec != "" && err == nil {
+		ev.Info("", "endpoint resolver: %s", r.String())
+	}
+	return r
+}
+
+// ResolverInfo names the endpoint resolver in use, for /state and the TUI.
+func (s *Supervisor) ResolverInfo() string {
+	if s.res == nil {
+		return "system"
+	}
+	return s.res.String()
 }
 
 // LoadConfigs scans the config dir and (re)loads every *.conf.
@@ -269,8 +356,9 @@ func (s *Supervisor) BootInit(freshBoot bool) {
 // responsive, so neither may happen while holding it.
 type probePlan struct {
 	name     string
-	uapiPath string
-	jobs     []endpointJob // hostname endpoints worth re-resolving this pass
+	ifname   string
+	periodic bool           // this pass is a due periodic recheck, not just filling gaps
+	jobs     []endpointJob  // hostname endpoints worth re-resolving this pass
 }
 
 // endpointJob is one hostname endpoint that needs a fresh DNS answer.
@@ -282,6 +370,7 @@ type endpointJob struct {
 // resolution is the outcome of resolving one endpointJob.
 type resolution struct {
 	candidates []string
+	result     resolver.Result
 	err        error
 }
 
@@ -300,20 +389,26 @@ type probeResult struct {
 // probe, DNS) without it, then apply the results under the lock again. Every
 // phase re-validates what it touches, since the world can change in between.
 func (s *Supervisor) Reconcile() {
+	start := time.Now()
+	s.beat()
 	s.mu.Lock()
 	confErr := s.loadConfigsLocked() // pick up config files changed on disk
 	plans := s.planLocked()
 	s.mu.Unlock()
+	s.beat()
 
 	if confErr != nil {
 		s.ev.Warn("", "config rescan failed: %v", confErr)
 	}
 
-	results := runProbes(plans)
+	results := s.runProbes(plans)
 
 	s.mu.Lock()
 	s.finishLocked(results)
 	s.mu.Unlock()
+	s.lastReconcileDur.Store(int64(time.Since(start)))
+	s.lastReconcile.Store(time.Now().UnixNano())
+	s.beat()
 }
 
 // planLocked handles the lifecycle transitions that are due and returns the
@@ -335,10 +430,12 @@ func (s *Supervisor) planLocked() []probePlan {
 		case !st.DesiredRun && i.running():
 			s.stopLocked(i, "desired stopped")
 		case i.running():
+			jobs, periodic := endpointJobs(i)
 			plans = append(plans, probePlan{
 				name:     i.name,
-				uapiPath: i.uapiPath(),
-				jobs:     endpointJobs(i),
+				ifname:   i.tun,
+				periodic: periodic,
+				jobs:     jobs,
 			})
 		}
 	}
@@ -347,25 +444,35 @@ func (s *Supervisor) planLocked() []probePlan {
 
 // runProbes performs the blocking work: one UAPI round trip per instance plus
 // one DNS resolution per endpoint that is due. Called WITHOUT s.mu held.
-func runProbes(plans []probePlan) []probeResult {
+func (s *Supervisor) runProbes(plans []probePlan) []probeResult {
 	out := make([]probeResult, 0, len(plans))
 	for _, p := range plans {
 		res := probeResult{plan: p}
-		st, err := uapi.Get(p.uapiPath)
+		st, err := s.statusDevice(p.ifname)
 		res.status, res.getErr = st, err
 		// A device that does not answer has nothing useful to compare against,
 		// so do not spend lookups on it.
 		if err == nil && len(p.jobs) > 0 {
 			res.resolved = make(map[string]resolution, len(p.jobs))
 			for _, job := range p.jobs {
-				cands, rerr := resolveEndpointAll(job.endpoint)
-				res.resolved[job.peerKey] = resolution{candidates: cands, err: rerr}
+				ctx, cancel := context.WithTimeout(context.Background(), endpointLookupTimeout)
+				cands, rres, rerr := s.resolveEndpointAll(ctx, job.endpoint)
+				cancel()
+				res.resolved[job.peerKey] = resolution{candidates: cands, result: rres, err: rerr}
+				// Beat per lookup, not just per instance: a host with many
+				// hostname peers is slow, not hung.
+				s.beat()
 			}
 		}
 		out = append(out, res)
+		s.beat()
 	}
 	return out
 }
+
+// endpointLookupTimeout is generous because the macOS system resolver can
+// spend seconds on a dead nameserver before trying the next one.
+const endpointLookupTimeout = 8 * time.Second
 
 // finishLocked applies probe results: caches the fresh status, retires unhealthy
 // instances with backoff, and pushes whatever the DNS answers imply. Callers
@@ -373,11 +480,11 @@ func runProbes(plans []probePlan) []probeResult {
 func (s *Supervisor) finishLocked(results []probeResult) {
 	for _, r := range results {
 		i, ok := s.insts[r.plan.name]
-		if !ok || i.uapiPath() != r.plan.uapiPath {
-			continue // removed, or restarted on another tun while we probed
+		if !ok || i.tun != r.plan.ifname {
+			continue // removed, or restarted on another interface while we probed
 		}
 		if r.getErr == nil {
-			if !pidAlive(i.pid) {
+			if backend == backendUserspace && !pidAlive(i.pid) {
 				// Bookkeeping only: the device answered, so refresh the recorded
 				// pid when it is the exited launcher wireguard-go forks off.
 				if p := socketPid(i.uapiPath()); p > 0 {
@@ -386,12 +493,14 @@ func (s *Supervisor) finishLocked(results []probeResult) {
 			}
 			i.status, i.statusAt = r.status, time.Now()
 			i.failStreak = 0
-			s.applyEndpointsLocked(i, r.status, r.plan.jobs, r.resolved)
+			s.applyEndpointsLocked(i, r.status, r.plan.periodic, r.plan.jobs, r.resolved)
 			continue
 		}
 		i.failStreak++
 		reason := "process dead"
-		if pidAlive(i.pid) {
+		if backend == backendKernel {
+			reason = "kernel device missing"
+		} else if pidAlive(i.pid) {
 			reason = fmt.Sprintf("uapi unresponsive: %v", r.getErr)
 		}
 		s.ev.Error(i.name, "instance unhealthy (%s), cleaning up for restart", reason)
@@ -416,12 +525,11 @@ const peerFillGiveUp = 6
 // A device whose status was never read yet yields no jobs: the config was just
 // pushed with a fresh resolution at start or adoption, and the next pass has a
 // status to compare against.
-func endpointJobs(i *inst) []endpointJob {
+func endpointJobs(i *inst) (jobs []endpointJob, periodic bool) {
 	if i.status == nil {
-		return nil
+		return nil, false
 	}
 	due := i.endpointCheckDue(i.status)
-	var jobs []endpointJob
 	for _, p := range i.conf.Peers {
 		if !isHostnameEndpoint(p.Endpoint) {
 			continue
@@ -432,50 +540,106 @@ func endpointJobs(i *inst) []endpointJob {
 		}
 		jobs = append(jobs, endpointJob{peerKey: p.PublicKey, endpoint: p.Endpoint})
 	}
-	return jobs
+	return jobs, due
 }
 
 // applyEndpointsLocked pushes whatever the pre-computed DNS answers imply: a
 // retargeted endpoint when the answer moved, or a peer's whole block when the
 // device never got one. It never sends replace_peers, so an instance's healthy
 // peers keep their sessions while another peer is being fixed.
-func (s *Supervisor) applyEndpointsLocked(i *inst, st *uapi.DeviceStatus, jobs []endpointJob, res map[string]resolution) {
+//
+// The switch policy is health-gated on purpose. A DDNS name with two A
+// records (or two resolvers that disagree) returns a different answer on
+// every lookup; retargeting a healthy tunnel on each change makes it flap
+// between addresses for no benefit. Only when the current endpoint is not
+// working do we adopt a new answer.
+func (s *Supervisor) applyEndpointsLocked(i *inst, st *uapi.DeviceStatus, periodic bool, jobs []endpointJob, res map[string]resolution) {
 	if len(jobs) == 0 {
 		return
 	}
-	i.lastEPCheck = time.Now()
+	now := time.Now()
+	// Only a due periodic pass resets the clock. A gap-fill for one peer runs
+	// on every tick; letting it reset the clock would starve the periodic
+	// recheck of every other hostname peer.
+	if periodic {
+		i.lastEPCheck = now
+	}
 	for _, job := range jobs {
 		r, ok := res[job.peerKey]
 		if !ok {
 			continue
 		}
+		d := i.diagFor(job)
+		d.CheckedAt = now
+		d.Resolver = r.result.Server
+		d.TTLSec = int64(r.result.TTL.Seconds())
+		d.Candidates = append([]string(nil), r.candidates...)
+		d.Error = ""
 		if r.err != nil {
+			d.Decision = "unresolved"
+			d.Error = r.err.Error()
 			// Usually DNS not being up yet right after boot: keep asking, this
 			// clears itself as soon as the resolver answers.
 			s.ev.Warn(i.name, "endpoint %s unresolved (will retry): %v", job.endpoint, r.err)
 			continue
 		}
+		d.FakeIP = fakeIPRange(r.result)
+		if d.FakeIP != "" {
+			s.warnFakeIP(i, job.endpoint, d.FakeIP)
+		}
 		live := findLivePeer(st, job.peerKey)
+		d.Live = ""
+		if live != nil {
+			d.Live = live.Endpoint
+		}
 
 		if live != nil && live.Endpoint != "" {
-			// A round-robin record answers in a different order on every lookup;
-			// flipping between equivalent addresses is churn, not progress, so
-			// any candidate matching what the device already uses counts as
-			// unchanged.
+			// The current address is still one of the answers. Nothing to do —
+			// except when the tunnel is unhealthy and another answer exists,
+			// which is how a multi-A record with a dead first entry recovers.
 			if containsString(r.candidates, live.Endpoint) {
-				delete(i.peerRetry, job.peerKey) // healthy: forget any backoff
+				delete(i.peerRetry, job.peerKey) // reachable answer: forget any backoff
+				if i.peerUnhealthy(live, findConfPeer(i.conf, job.peerKey)) {
+					alt := i.nextCandidate(job.peerKey, live.Endpoint, r.candidates)
+					if alt != "" {
+						s.pinEndpointFor(i, alt)
+						if err := s.setDeviceEndpoint(i, job.peerKey, alt); err != nil {
+							d.Decision = "rotate failed"
+							d.Error = err.Error()
+							s.ev.Warn(i.name, "endpoint %s -> %s rotate failed: %v", live.Endpoint, alt, err)
+							continue
+						}
+						d.Decision = "rotated"
+						d.Live = alt
+						s.ev.Info(i.name, "endpoint %s -> %s (%s still lists %s but the tunnel is unhealthy), rotated", live.Endpoint, alt, job.endpoint, live.Endpoint)
+						continue
+					}
+				}
+				d.Decision = "unchanged"
 				continue
 			}
-			if err := uapi.SetPeerEndpoint(i.uapiPath(), job.peerKey, r.candidates[0]); err != nil {
+			// DNS no longer publishes the address the device uses.
+			if !i.peerUnhealthy(live, findConfPeer(i.conf, job.peerKey)) {
+				d.Decision = "held (healthy)"
+				s.ev.Debug(i.name, "endpoint %s -> %s (%s changed) not applied: tunnel still healthy via %s", live.Endpoint, r.candidates[0], job.endpoint, live.Endpoint)
+				continue
+			}
+			s.pinEndpointFor(i, r.candidates[0])
+			if err := s.setDeviceEndpoint(i, job.peerKey, r.candidates[0]); err != nil {
+				d.Decision = "retarget failed"
+				d.Error = err.Error()
 				s.ev.Warn(i.name, "endpoint %s -> %s push failed: %v", live.Endpoint, r.candidates[0], err)
 				continue
 			}
+			d.Decision = "retargeted"
+			d.Live = r.candidates[0]
 			s.ev.Info(i.name, "endpoint %s -> %s (%s changed), re-pushed", live.Endpoint, r.candidates[0], job.endpoint)
 			continue
 		}
 
 		// The device has no usable endpoint for this peer.
 		if i.peerRetry[job.peerKey] >= peerFillGiveUp {
+			d.Decision = "giving up"
 			continue // already reported; a config change or restart retries
 		}
 		var err error
@@ -486,7 +650,8 @@ func (s *Supervisor) applyEndpointsLocked(i *inst, st *uapi.DeviceStatus, jobs [
 			if p == nil {
 				continue // config edited while we were resolving; next pass handles it
 			}
-			err = uapi.UpsertPeer(i.uapiPath(), uapi.SetPeer{
+			s.pinEndpointFor(i, r.candidates[0])
+			err = s.upsertDevicePeer(i, uapi.SetPeer{
 				PublicKey:           p.PublicKey,
 				PresharedKey:        p.PresharedKey,
 				Endpoint:            r.candidates[0],
@@ -494,12 +659,17 @@ func (s *Supervisor) applyEndpointsLocked(i *inst, st *uapi.DeviceStatus, jobs [
 				PersistentKeepalive: p.PersistentKeepalive,
 			})
 		} else {
-			err = uapi.SetPeerEndpoint(i.uapiPath(), job.peerKey, r.candidates[0])
+			s.pinEndpointFor(i, r.candidates[0])
+			err = s.setDeviceEndpoint(i, job.peerKey, r.candidates[0])
 		}
 		if err != nil {
+			d.Decision = "fill failed"
+			d.Error = err.Error()
 			s.ev.Warn(i.name, "endpoint push for %s failed: %v", job.endpoint, err)
 			continue
 		}
+		d.Decision = "filled"
+		d.Live = r.candidates[0]
 		if live == nil {
 			if i.bumpPeerRetry(job.peerKey) == peerFillGiveUp {
 				s.ev.Error(i.name, "peer %s still absent from the device after %d pushes, giving up; wireguard-go silently drops a peer whose public key equals this instance's own", abbrevKey(job.peerKey), peerFillGiveUp)
@@ -508,6 +678,94 @@ func (s *Supervisor) applyEndpointsLocked(i *inst, st *uapi.DeviceStatus, jobs [
 		}
 		s.ev.Info(i.name, "endpoint %s resolved and pushed", r.candidates[0])
 	}
+}
+
+// diagFor returns the mutable diagnostic record for one endpoint job.
+func (i *inst) diagFor(job endpointJob) *endpointDiag {
+	if i.epDiag == nil {
+		i.epDiag = map[string]*endpointDiag{}
+	}
+	d, ok := i.epDiag[job.peerKey]
+	if !ok {
+		d = &endpointDiag{PeerKey: job.peerKey}
+		i.epDiag[job.peerKey] = d
+	}
+	d.Config = job.endpoint
+	return d
+}
+
+// peerUnhealthy reports whether the device's current endpoint for a peer is
+// not carrying traffic. Peers that never handshaked are treated as healthy
+// unless they ask for keepalives and have had time to complete one — idle and
+// unreachable look identical otherwise.
+func (i *inst) peerUnhealthy(live *uapi.PeerStatus, p *wgconf.Peer) bool {
+	if live == nil || live.Endpoint == "" {
+		return true
+	}
+	if handshaked(live.LastHandshake) {
+		return time.Since(live.LastHandshake) > handshakeStaleAfter
+	}
+	if p != nil && p.PersistentKeepalive > 0 && !i.startedAt.IsZero() &&
+		time.Since(i.startedAt) > endpointNoHandshakeGrace && live.TxBytes > 0 {
+		return true
+	}
+	return false
+}
+
+// nextCandidate picks an address other than the current one so an unhealthy
+// peer can try the rest of a multi-answer record. Rate-limited so a dead set
+// of answers is not cycled through on every reconcile tick.
+func (i *inst) nextCandidate(peerKey, current string, candidates []string) string {
+	if len(candidates) < 2 {
+		return ""
+	}
+	now := time.Now()
+	if i.peerLastSwitch == nil {
+		i.peerLastSwitch = map[string]time.Time{}
+	}
+	if now.Sub(i.peerLastSwitch[peerKey]) < endpointRotateEvery {
+		return ""
+	}
+	idx := -1
+	for j, c := range candidates {
+		if c == current {
+			idx = j
+			break
+		}
+	}
+	if idx < 0 {
+		return ""
+	}
+	next := candidates[(idx+1)%len(candidates)]
+	if next == current {
+		return ""
+	}
+	i.peerLastSwitch[peerKey] = now
+	return next
+}
+
+// fakeIPRange returns the fake-IP range any answer falls into, or "".
+func fakeIPRange(r resolver.Result) string {
+	for _, a := range r.Answers {
+		if reason := resolver.FakeIPReason(a.IP); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+// warnFakeIP reports a fake-IP answer at most once per endpoint/range per
+// hour. The answer is not refused: the router may be proxying it correctly.
+func (s *Supervisor) warnFakeIP(i *inst, endpoint, rangeStr string) {
+	key := endpoint + "|" + rangeStr
+	if i.fakeWarn == nil {
+		i.fakeWarn = map[string]time.Time{}
+	}
+	if time.Since(i.fakeWarn[key]) < time.Hour {
+		return
+	}
+	i.fakeWarn[key] = time.Now()
+	s.ev.Warn(i.name, "endpoint %s resolves into fake-IP range %s; DDNS tracking cannot see the real address — set WGTUN_ENDPOINT_RESOLVER=doh:https://dns.alidns.com/dns-query (or a udp: resolver outside the router) and reinstall the daemon", endpoint, rangeStr)
 }
 
 // findConfPeer returns the configured peer with the given public key.
@@ -552,10 +810,11 @@ func (i *inst) endpointCheckDue(st *uapi.DeviceStatus) bool {
 	return i.handshakeStale(st)
 }
 
-// handshakeStale reports whether a hostname peer that has handshaken before
-// has stopped doing so. Peers that never handshaked are ignored: an idle peer
-// looks exactly like an unreachable one, and guessing would hold the fast lane
-// open forever.
+// handshakeStale reports whether a hostname peer needs the fast recheck lane:
+// it has handshaken before and gone quiet, or it asked for keepalives and has
+// never completed a handshake within the grace period. Plain never-handshaked
+// peers are ignored — an idle peer looks exactly like an unreachable one, and
+// guessing would hold the fast lane open forever.
 func (i *inst) handshakeStale(st *uapi.DeviceStatus) bool {
 	cut := time.Now().Add(-handshakeStaleAfter)
 	for _, p := range i.conf.Peers {
@@ -563,10 +822,17 @@ func (i *inst) handshakeStale(st *uapi.DeviceStatus) bool {
 			continue
 		}
 		live := findLivePeer(st, p.PublicKey)
-		if live == nil || live.Endpoint == "" || !handshaked(live.LastHandshake) {
+		if live == nil || live.Endpoint == "" {
 			continue
 		}
-		if live.LastHandshake.Before(cut) {
+		if handshaked(live.LastHandshake) {
+			if live.LastHandshake.Before(cut) {
+				return true
+			}
+			continue
+		}
+		if p.PersistentKeepalive > 0 && !i.startedAt.IsZero() &&
+			time.Since(i.startedAt) > endpointNoHandshakeGrace && live.TxBytes > 0 {
 			return true
 		}
 	}
@@ -687,7 +953,9 @@ func (s *Supervisor) SetEnabled(name string, enabled bool) error {
 	return s.st.Update(name, func(in *state.Instance) { in.Enabled = enabled })
 }
 
-// startLocked launches wireguard-go, pushes config, sets addresses/routes.
+// startLocked brings one instance up: create the device (userspace process or
+// kernel link), push the config, pin endpoint routes, then enable addresses
+// and routes. Backend-specific work is dispatched through backend*.go.
 func (s *Supervisor) startLocked(i *inst) error {
 	started := time.Now()
 	dir := i.runtimeDir()
@@ -702,78 +970,49 @@ func (s *Supervisor) startLocked(i *inst) error {
 			s.ev.Warn(i.name, "PostUp failed: %v", err)
 		}
 	}
-	if err := os.MkdirAll(paths.WireGuardSockDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir wireguard socket dir: %v", err)
-	}
-	cmd := exec.Command(paths.WireGuardGo, "utun")
-	cmd.Env = append(os.Environ(),
-		"WG_TUN_NAME_FILE="+filepath.Join(dir, "tun.name"),
-	)
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-	if err := cmd.Start(); err != nil {
+	if err := s.startDeviceLocked(i); err != nil {
+		s.cleanupLocked(i)
 		i.lastErr = err.Error()
-		return fmt.Errorf("start wireguard-go: %v", err)
+		return err
 	}
 	i.adopted = false
 	i.startedAt = started
-	// wireguard-go forks on darwin: the launcher process exits immediately
-	// and the real device process is reparented to launchd. Reap the
-	// launcher silently; the authoritative pid comes from the UAPI socket
-	// below.
-	go func() { cmd.Wait() }()
-	go s.pumpWireguardLogs(i.name, stderr)
-
-	// wait for the tun name and UAPI socket
-	tun, err := waitTunName(dir, 5*time.Second)
+	endpoints, err := s.configureDeviceLocked(i)
 	if err != nil {
-		s.cleanupLocked(i)
-		i.lastErr = err.Error()
-		return err
-	}
-	i.tun = tun
-	if err := waitFile(i.uapiPath(), 5*time.Second); err != nil {
-		s.cleanupLocked(i)
-		i.lastErr = err.Error()
-		return fmt.Errorf("uapi socket: %v", err)
-	}
-	// the pid that matters is the one holding the UAPI socket
-	pid, err := waitSocketPid(i.uapiPath(), 3*time.Second)
-	if err != nil {
-		s.cleanupLocked(i)
-		i.lastErr = err.Error()
-		return err
-	}
-	i.pid = pid
-	if err := os.WriteFile(filepath.Join(dir, "pid"), []byte(strconv.Itoa(i.pid)), 0o644); err != nil {
-		s.ev.Warn(i.name, "write pid file: %v", err)
-	}
-	if err := s.pushConfLocked(i); err != nil {
 		s.cleanupLocked(i)
 		i.lastErr = err.Error()
 		return err
 	}
 	// the endpoints were just resolved by the push
 	i.lastEPCheck = time.Now()
-	if err := netsetup(i.tun, i.conf); err != nil {
+	for _, ep := range endpoints {
+		s.pinEndpointFor(i, ep)
+	}
+	if err := s.setupNetwork(i); err != nil {
 		s.cleanupLocked(i)
 		i.lastErr = err.Error()
 		return fmt.Errorf("network setup: %v", err)
 	}
+	i.active = true
 	i.lastErr = ""
-	s.ev.Info(i.name, "started on %s (pid %d)", i.tun, i.pid)
+	if i.pid > 0 {
+		s.ev.Info(i.name, "started on %s (pid %d)", i.tun, i.pid)
+	} else {
+		s.ev.Info(i.name, "started on %s (%s)", i.tun, backend)
+	}
 	return nil
 }
 
 // pushConfLocked writes the parsed config to the device over UAPI,
-// resolving peer endpoint DNS first.
-func (s *Supervisor) pushConfLocked(i *inst) error {
+// resolving peer endpoint DNS first. It returns the ip:port endpoints it
+// actually pushed so the caller can pin routes for them before enabling the
+// tunnel's own routes.
+func (s *Supervisor) pushConfLocked(i *inst) ([]string, error) {
 	req := uapi.SetRequest{
 		PrivateKey: i.conf.Interface.PrivateKey,
 		ListenPort: i.conf.Interface.ListenPort,
 	}
+	var endpoints []string
 	for _, p := range i.conf.Peers {
 		sp := uapi.SetPeer{
 			PublicKey:           p.PublicKey,
@@ -782,16 +1021,30 @@ func (s *Supervisor) pushConfLocked(i *inst) error {
 			AllowedIPs:          prefixesToStrings(p.AllowedIPs),
 		}
 		if p.Endpoint != "" {
-			resolved, err := resolveEndpoint(p.Endpoint)
+			ctx, cancel := context.WithTimeout(context.Background(), endpointLookupTimeout)
+			resolved, rres, err := s.resolveEndpointAll(ctx, p.Endpoint)
+			cancel()
 			if err != nil {
 				s.ev.Warn(i.name, "endpoint %s unresolved (will retry): %v", p.Endpoint, err)
 			} else {
-				sp.Endpoint = resolved
+				sp.Endpoint = resolved[0]
+				endpoints = append(endpoints, resolved[0])
+				d := i.diagFor(endpointJob{peerKey: p.PublicKey, endpoint: p.Endpoint})
+				d.CheckedAt = time.Now()
+				d.Resolver = rres.Server
+				d.TTLSec = int64(rres.TTL.Seconds())
+				d.Candidates = append([]string(nil), resolved...)
+				d.Live = resolved[0]
+				d.Decision = "pushed at start"
+				d.FakeIP = fakeIPRange(rres)
+				if d.FakeIP != "" && isHostnameEndpoint(p.Endpoint) {
+					s.warnFakeIP(i, p.Endpoint, d.FakeIP)
+				}
 			}
 		}
 		req.Peers = append(req.Peers, sp)
 	}
-	return uapi.Set(i.uapiPath(), req)
+	return endpoints, uapi.Set(i.uapiPath(), req)
 }
 
 // stopLocked tears down: hooks, process, runtime dir. Routes and addresses
@@ -809,29 +1062,14 @@ func (s *Supervisor) stopLocked(i *inst, reason string) {
 // cleanupLocked kills the process (if alive) and removes the runtime dir
 // and the device's UAPI socket.
 func (s *Supervisor) cleanupLocked(i *inst) {
-	// trust the socket holder over the recorded pid when possible
-	if i.tun != "" {
-		if p := socketPid(i.uapiPath()); p > 0 {
-			i.pid = p
-		}
-	}
-	if i.pid != 0 && pidAlive(i.pid) && i.ownsProcess() {
-		syscall.Kill(i.pid, syscall.SIGTERM)
-		deadline := time.Now().Add(3 * time.Second)
-		for pidAlive(i.pid) && time.Now().Before(deadline) {
-			time.Sleep(50 * time.Millisecond)
-		}
-		if pidAlive(i.pid) {
-			syscall.Kill(i.pid, syscall.SIGKILL)
-		}
-	}
-	if i.tun != "" {
-		os.Remove(i.uapiPath())
-	}
+	s.teardownDeviceLocked(i)
+	s.unpinEndpoints(i)
 	os.RemoveAll(i.runtimeDir())
 	i.pid, i.tun, i.status = 0, "", nil
+	i.active = false
 	i.lastEPCheck = time.Time{}
 	i.peerRetry = nil
+	i.peerLastSwitch = nil
 	i.adopted = false
 }
 
@@ -862,7 +1100,9 @@ func (s *Supervisor) pumpWireguardLogs(name string, r io.Reader) {
 }
 
 // Adopt discovers instances still running from a previous daemon life and
-// re-adopts them (pid + UAPI responsiveness).
+// re-adopts them. The backend-specific probe lives in backend_userspace.go /
+// backend_kernel_linux.go; a failure simply leaves the instance for reconcile
+// to start.
 func (s *Supervisor) Adopt() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -877,41 +1117,18 @@ func (s *Supervisor) Adopt() {
 		name := e.Name()
 		i, ok := s.insts[name]
 		if !ok {
-			// unknown instance: clean up stale runtime dir
-			os.RemoveAll(filepath.Join(paths.RunDir, name))
+			// Unknown instance: drop any kernel device it left behind, then its
+			// runtime dir. A userspace process would already be gone (no pid
+			// file match) and its TUN dies with it.
+			dir := filepath.Join(paths.RunDir, name)
+			if tun, err := os.ReadFile(filepath.Join(dir, "tun.name")); err == nil {
+				removeTunLink(strings.TrimSpace(string(tun)))
+			}
+			os.RemoveAll(dir)
 			s.ev.Warn(name, "removed stale runtime dir (no config)")
 			continue
 		}
-		dir := i.runtimeDir()
-		tun, err := os.ReadFile(filepath.Join(dir, "tun.name"))
-		if err != nil {
-			os.RemoveAll(dir)
-			continue
-		}
-		i.tun = strings.TrimSpace(string(tun))
-		pid := 0
-		if data, err := os.ReadFile(filepath.Join(dir, "pid")); err == nil {
-			pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
-		}
-		if pid <= 0 || !pidAlive(pid) {
-			// the recorded pid may be the exited launcher; trust the socket
-			pid = socketPid(i.uapiPath())
-		}
-		if pid <= 0 {
-			os.RemoveAll(dir)
-			i.tun = ""
-			continue
-		}
-		i.pid = pid
-		if _, err := uapi.Get(i.uapiPath()); err != nil {
-			// process alive but backend wedged — clean and let reconcile restart
-			s.ev.Warn(name, "adopted pid %d but UAPI dead, cleaning", pid)
-			s.cleanupLocked(i)
-			continue
-		}
-		i.adopted = true
-		i.startedAt = time.Now() // best effort
-		s.ev.Info(name, "adopted running instance on %s (pid %d)", i.tun, i.pid)
+		s.adoptDeviceLocked(i)
 	}
 }
 
@@ -962,6 +1179,41 @@ func (s *Supervisor) LiveStatus(name string) (*uapi.DeviceStatus, time.Time, err
 		return nil, time.Time{}, fmt.Errorf("instance %q not running", name)
 	}
 	return i.status, i.statusAt, nil
+}
+
+// EndpointDiags returns the last DNS observation for every hostname peer of
+// one instance. The live endpoint is refreshed from the latest status so the
+// UI shows what the device uses now, not what it used at the last DNS check.
+func (s *Supervisor) EndpointDiags(name string) []wire.EndpointDiag {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i, ok := s.insts[name]
+	if !ok {
+		return nil
+	}
+	out := make([]wire.EndpointDiag, 0, len(i.epDiag))
+	for _, d := range i.epDiag {
+		live := d.Live
+		if !i.running() {
+			live = ""
+		} else if p := findLivePeer(i.status, d.PeerKey); p != nil {
+			live = p.Endpoint
+		}
+		out = append(out, wire.EndpointDiag{
+			PeerKey:    d.PeerKey,
+			Config:     d.Config,
+			Live:       live,
+			CheckedAt:  d.CheckedAt,
+			Candidates: append([]string(nil), d.Candidates...),
+			TTLSec:     d.TTLSec,
+			Resolver:   d.Resolver,
+			FakeIP:     d.FakeIP,
+			Decision:   d.Decision,
+			Error:      d.Error,
+		})
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Config < out[b].Config })
+	return out
 }
 
 // DevicePublicKey returns the derived public key of one instance.
@@ -1112,64 +1364,6 @@ func pidAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
 
-// socketPid returns the pid holding the given UAPI socket, 0 if none.
-// wireguard-go forks on darwin, so the pid returned by exec is not the
-// device process — the socket holder is the authoritative one.
-func socketPid(sockPath string) int {
-	if sockPath == "" {
-		return 0
-	}
-	out, err := exec.Command("/usr/sbin/lsof", "-t", sockPath).Output()
-	if err != nil {
-		return 0
-	}
-	for _, f := range strings.Fields(string(out)) {
-		if pid, err := strconv.Atoi(f); err == nil {
-			return pid
-		}
-	}
-	return 0
-}
-
-// waitSocketPid polls until the socket has an owner.
-func waitSocketPid(sockPath string, timeout time.Duration) (int, error) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if pid := socketPid(sockPath); pid > 0 {
-			return pid, nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return 0, fmt.Errorf("no process owns %s", sockPath)
-}
-
-func waitTunName(dir string, timeout time.Duration) (string, error) {
-	path := filepath.Join(dir, "tun.name")
-	if err := waitFile(path, timeout); err != nil {
-		return "", err
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	name := strings.TrimSpace(string(data))
-	if name == "" {
-		return "", fmt.Errorf("empty tun name")
-	}
-	return name, nil
-}
-
-func waitFile(path string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return fmt.Errorf("timeout waiting for %s", path)
-}
-
 func prefixesToStrings(ps []netip.Prefix) []string {
 	out := make([]string, len(ps))
 	for i, p := range ps {
@@ -1178,52 +1372,39 @@ func prefixesToStrings(ps []netip.Prefix) []string {
 	return out
 }
 
-// resolveEndpoint resolves host:port to the preferred ip:port. A literal
-// address is passed through untouched.
-func resolveEndpoint(ep string) (string, error) {
-	all, err := resolveEndpointAll(ep)
-	if err != nil {
-		return "", err
-	}
-	return all[0], nil
-}
-
 // resolveEndpointAll resolves host:port to every ip:port it may legitimately
-// point at (multi-A records have more than one), with a bounded timeout.
-func resolveEndpointAll(ep string) ([]string, error) {
+// point at (multi-A records have more than one). A literal address is passed
+// through untouched and never hits DNS. The resolver result (TTL, server) is
+// returned alongside for diagnostics.
+func (s *Supervisor) resolveEndpointAll(ctx context.Context, ep string) ([]string, resolver.Result, error) {
 	host, port, err := net.SplitHostPort(ep)
 	if err != nil {
-		return nil, err
+		return nil, resolver.Result{}, err
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		return []string{ep}, nil
+		return []string{ep}, resolver.Result{Server: "literal"}, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	addrs, err := lookupIPAddr(ctx, host)
+	if s.res == nil {
+		return nil, resolver.Result{}, fmt.Errorf("no resolver configured")
+	}
+	res, err := s.res.Lookup(ctx, host)
 	if err != nil {
-		return nil, err
+		return nil, res, err
 	}
-	if len(addrs) == 0 {
-		return nil, fmt.Errorf("no addresses for %s", host)
+	if len(res.Answers) == 0 {
+		return nil, res, fmt.Errorf("no addresses for %s", host)
 	}
-	out := make([]string, 0, len(addrs))
-	for _, a := range addrs {
+	out := make([]string, 0, len(res.Answers))
+	for _, a := range res.Answers {
 		out = append(out, joinHostPort(a.IP, port))
 	}
-	return out, nil
-}
-
-// lookupIPAddr is a test seam around the system resolver.
-var lookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
-	var r net.Resolver
-	return r.LookupIPAddr(ctx, host)
+	return out, res, nil
 }
 
 // joinHostPort formats an ip:port the way the UAPI protocol expects it:
 // bracketed for IPv6, bare for IPv4.
-func joinHostPort(ip net.IP, port string) string {
-	if ip.To4() != nil {
+func joinHostPort(ip netip.Addr, port string) string {
+	if ip.Is4() {
 		return ip.String() + ":" + port
 	}
 	return "[" + ip.String() + "]:" + port
