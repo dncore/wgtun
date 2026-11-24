@@ -379,6 +379,40 @@ address and WireGuard's own roaming retargets the endpoint in about 25 seconds,
 with no lookup involved. That second option also covers the case no amount of
 re-resolving can: a DDNS record that never gets updated at all.
 
+### Handshake liveness: the wedged-device case
+
+The DDNS logic keeps a *hostname* endpoint honest, but it cannot see the other
+half of the problem. A userspace device can stay alive — UAPI answering,
+interface up, addresses and routes in place — while its receive path is gone.
+wireguard-go runs one receive routine per socket family and **returns from it
+permanently on any non-temporary receive error** (`device/receive.go`), logging
+only at verbose level. Its timers keep running, so it keeps sending handshake
+initiations every five seconds, the far end keeps answering them, the handshake
+never completes, `last_handshake_time` freezes and no data flows. Nothing in
+UAPI exposes that state; every existing probe still says "healthy".
+
+A peer that asks for keepalives re-handshakes on a working device as soon as its
+session ages out — about every 2 minutes with the usual `PersistentKeepalive =
+25` (measured here: 125s and 167s between handshakes), and longer with a longer
+keepalive, which is why the window scales. So wgtun treats a keepalive-enabled
+peer with no completed handshake for `max(5 min, 4 × keepalive)` as the
+signature of a wedged local device — or of a far end that stopped answering —
+and restarts the device: that is the only repair the first case has, and the
+backoff bounds the cost of the second. Two guards keep the restart from
+becoming collateral damage:
+
+- if any peer of the same device handshaked recently, the process is provably
+  still receiving and the stalled peer is the far end's problem, so nothing is
+  restarted; and
+- restarts back off 5m → 10m → 20m → 40m → 1h (reset by the next successful
+  handshake), so a server that is genuinely down does not turn into a restart
+  loop.
+
+The restart is logged at ERROR with the peer, how long it has been silent and
+the attempt number. This also covers literal `ip:port` endpoints, which the
+DDNS logic never inspects — exactly the peers most likely to sit dead
+unnoticed.
+
 ### fake-IP and untrusted system resolvers
 
 If the upstream router (OpenWrt + OpenClash/Mihomo, Surge, …) runs fake-IP, it
@@ -501,7 +535,7 @@ deletes that directory (0.2.2+ writes the stable `bin/wgtun` symlink).
 | Linux did not use the kernel backend | `lsmod \| grep wireguard`, `sudo modprobe wireguard`; force with `WGTUN_BACKEND=kernel` (it falls back and logs if unavailable) |
 | Linux TUI cannot reach the socket | install with `sudo` so the invoking user's group is baked in, or `sudo env WGTUN_SOCKET_GROUP=$(id -gn) wgtun daemon --install` |
 | Daemon stops starting after `brew upgrade` | `sudo wgtun daemon --install` — 0.2.1 and earlier wrote a versioned `Cellar/...` path into the plist |
-| Instance up but no handshake | Logs tab, or `/var/log/wgtun/events.jsonl`; check endpoint DNS |
+| Instance up but no handshake | Logs tab, or `/var/log/wgtun/events.jsonl`; check endpoint DNS. If the log says `wedged receive path`, the daemon already restarted the device — repeated occurrences point at the far end |
 | Instance keeps restarting | Logs tab shows the reason; backoff pauses after 5 failures |
 | Log says a peer `still absent from the device ... giving up` | The peer's public key equals the instance's own public key; wireguard-go accepts it with `errno=0` and silently drops the peer |
 | A peer never gets an endpoint while DNS is down at boot | Expected: the daemon retries the one-peer push, and the warning repeats until the resolver answers |

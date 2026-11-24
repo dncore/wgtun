@@ -54,6 +54,23 @@ const (
 	// endpointRotateEvery rate-limits trying a different address from a
 	// multi-answer record while the current one is unhealthy.
 	endpointRotateEvery = 60 * time.Second
+
+	// handshakeStallAfter is how long a keepalive-enabled peer may go without
+	// a completed handshake before the device itself — not the far end — is
+	// presumed broken. A healthy device rekeys every ~2 minutes, and a peer
+	// asking for keepalives forces that cadence (measured here: 125s and 167s
+	// between handshakes on a keepalive=25 peer), so a wider gap means the
+	// wireguard-go process stopped receiving: its receive routine exits for
+	// good on any non-temporary socket error, silently, while its timers keep
+	// sending handshake initiations that the far end dutifully answers. UAPI
+	// stays responsive and the interface stays up, so nothing else notices.
+	handshakeStallAfter = 5 * time.Minute
+	// handshakeStallBackoffBase and handshakeStallBackoffMax bound how often a
+	// stalled instance is restarted. A restart is the only repair for a dead
+	// receive path, but a far end that is genuinely down looks the same from
+	// the outside; the backoff keeps that case from becoming a restart loop.
+	handshakeStallBackoffBase = 5 * time.Minute
+	handshakeStallBackoffMax  = time.Hour
 )
 
 // inst is the runtime view of one configured instance.
@@ -92,6 +109,11 @@ type inst struct {
 	epDiag map[string]*endpointDiag
 	// fakeWarn deduplicates the fake-IP warning per endpoint/range.
 	fakeWarn map[string]time.Time
+	// stallRestarts counts device restarts caused by a stalled handshake and
+	// stallNext is when the next one is allowed; both survive cleanupLocked so
+	// the backoff outlives the restart it was armed for.
+	stallRestarts int
+	stallNext     time.Time
 	// confSig is the config file revision this instance was parsed from, so an
 	// unchanged file is not re-read and re-parsed on every reconcile tick
 	confSig fileSig
@@ -493,6 +515,14 @@ func (s *Supervisor) finishLocked(results []probeResult) {
 			}
 			i.status, i.statusAt = r.status, time.Now()
 			i.failStreak = 0
+			if s.stallRestartDue(i, r.status, time.Now()) {
+				// The device answers UAPI and its interface is up, but nothing
+				// has been received for longer than a rekey period. Only a new
+				// process can rebuild a dead receive path.
+				s.cleanupLocked(i)
+				s.tryStartLocked(i)
+				continue
+			}
 			s.applyEndpointsLocked(i, r.status, r.plan.periodic, r.plan.jobs, r.resolved)
 			continue
 		}
@@ -845,6 +875,118 @@ func (i *inst) handshakeStale(st *uapi.DeviceStatus) bool {
 // alone is too subtle a contract to rely on here.
 func handshaked(t time.Time) bool { return !t.IsZero() && t.Unix() > 0 }
 
+// stalledPeer returns the first peer whose keepalive contract the device is
+// breaking: it asks for keepalives, it has an endpoint to send them to, the
+// device has transmitted something for it, and no handshake has completed
+// within the window. The window scales with the configured keepalive so a
+// deliberately long interval does not look like a stall, and never drops below
+// handshakeStallAfter. A peer with no endpoint is skipped: wgtun itself has
+// not handed it a destination yet, so restarting the device would not help.
+//
+// No peer is judged inside its first window after a (re)start — not even one
+// with an old handshake timestamp. That grace is what keeps a status captured
+// just before a restart from being applied to the fresh device (the probe runs
+// without the lock and the instance can be restarted meanwhile).
+func (i *inst) stalledPeer(st *uapi.DeviceStatus, now time.Time) (*uapi.PeerStatus, *wgconf.Peer, time.Duration) {
+	if st == nil {
+		return nil, nil, 0
+	}
+	for idx := range i.conf.Peers {
+		p := &i.conf.Peers[idx]
+		if p.PersistentKeepalive <= 0 {
+			continue
+		}
+		live := findLivePeer(st, p.PublicKey)
+		if live == nil || live.Endpoint == "" {
+			continue
+		}
+		window := time.Duration(p.PersistentKeepalive) * time.Second * 4
+		if window < handshakeStallAfter {
+			window = handshakeStallAfter
+		}
+		if i.startedAt.IsZero() || now.Sub(i.startedAt) <= window {
+			continue
+		}
+		if handshaked(live.LastHandshake) {
+			if now.Sub(live.LastHandshake) > window {
+				return live, p, window
+			}
+			continue
+		}
+		// Never handshaked: only a device that is actually trying (tx>0) is
+		// stalled. An idle one may simply not have queued anything yet.
+		if live.TxBytes > 0 {
+			return live, p, window
+		}
+	}
+	return nil, nil, 0
+}
+
+// recentlyHandshaked reports whether any peer of the device completed a
+// handshake inside its own stall window. That is direct proof the receive path
+// works, so a stalled sibling peer is a far-end problem and a restart would
+// only cost the healthy peer its session. Peers unknown to the config (left
+// over from an older revision) are judged by the base window.
+func (i *inst) recentlyHandshaked(st *uapi.DeviceStatus, now time.Time) bool {
+	if st == nil {
+		return false
+	}
+	for _, p := range st.Peers {
+		if !handshaked(p.LastHandshake) {
+			continue
+		}
+		window := handshakeStallAfter
+		if conf := findConfPeer(i.conf, p.PublicKey); conf != nil && conf.PersistentKeepalive > 0 {
+			if w := time.Duration(conf.PersistentKeepalive) * time.Second * 4; w > window {
+				window = w
+			}
+		}
+		if now.Sub(p.LastHandshake) <= window {
+			return true
+		}
+	}
+	return false
+}
+
+// stallBackoff is the pause after the n-th consecutive stall restart:
+// 5m, 10m, 20m, 40m, then hourly.
+func stallBackoff(tries int) time.Duration {
+	d := handshakeStallBackoffBase
+	for n := 1; n < tries && d < handshakeStallBackoffMax; n++ {
+		d *= 2
+	}
+	if d > handshakeStallBackoffMax {
+		d = handshakeStallBackoffMax
+	}
+	return d
+}
+
+// stallRestartDue decides whether a stalled handshake should cost the device a
+// restart, and owns the backoff bookkeeping. It is separate from the restart
+// itself so tests can drive the decision without touching processes.
+func (s *Supervisor) stallRestartDue(i *inst, st *uapi.DeviceStatus, now time.Time) bool {
+	if backend != backendUserspace {
+		return false // no userspace receive path to go deaf
+	}
+	live, p, window := i.stalledPeer(st, now)
+	if live == nil || i.recentlyHandshaked(st, now) {
+		i.stallRestarts, i.stallNext = 0, time.Time{}
+		return false
+	}
+	if now.Before(i.stallNext) {
+		return false
+	}
+	silence := "has never completed a handshake"
+	if handshaked(live.LastHandshake) {
+		silence = "has gone " + now.Sub(live.LastHandshake).Round(time.Second).String() + " without a handshake"
+	}
+	s.ev.Error(i.name, "peer %s %s although it asks for keepalives every %ds (window %s) and the device keeps transmitting; treating this as a wedged receive path (wireguard-go exits that routine silently on a socket error) and restarting the device (attempt %d)",
+		abbrevKey(p.PublicKey), silence, p.PersistentKeepalive, window, i.stallRestarts+1)
+	i.stallRestarts++
+	i.stallNext = now.Add(stallBackoff(i.stallRestarts))
+	return true
+}
+
 // isHostnameEndpoint reports whether an endpoint still needs DNS: a host:port
 // whose host is a name rather than a literal address.
 func isHostnameEndpoint(ep string) bool {
@@ -914,7 +1056,8 @@ func (s *Supervisor) Start(name string) error {
 	if i.running() {
 		s.stopLocked(i, "restart")
 	}
-	i.nextAttempt = time.Time{} // explicit user action clears backoff
+	i.nextAttempt = time.Time{}                   // explicit user action clears backoff
+	i.stallRestarts, i.stallNext = 0, time.Time{} // and the stall restart budget
 	err := s.startLocked(i)
 	if err == nil {
 		return s.st.Update(name, func(in *state.Instance) { in.DesiredRun = true })

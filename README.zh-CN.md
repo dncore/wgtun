@@ -334,6 +334,33 @@ TTL + 该阈值 + 一个快通道 tick 之间，取决于地址变化时那条�
 会在约 25 秒内把端点改过来，完全不涉及域名解析。后者还能覆盖「重解析无论
 多勤都救不了」的情形：DDNS 记录根本没被更新。
 
+### 握手存活：接收通路僵死的设备
+
+DDNS 那套逻辑只管**域名端点的地址是否正确**，看不见另一半问题：userspace
+设备可以仍然「活着」—— UAPI 有问必答、接口在、地址和路由都在 —— 而它的
+接收通路已经没了。wireguard-go 每个 socket family 各跑一条接收循环，
+**任何一次非临时性的接收错误都会让它永久退出**（`device/receive.go`），而且
+只在 verbose 级别留一行日志。它的定时器照常跑：每 5 秒发一个 handshake
+initiation，网关每次都正常回 response，握手却永远完不成，
+`last_handshake_time` 冻住，数据一个字节也过不去。UAPI 里没有任何字段能看出
+这个状态，daemon 原有的探活全都报告「健康」。
+
+配了 keepalive 的 peer，在设备正常时只要会话老化就会重新握手 —— 常见
+`PersistentKeepalive = 25` 下约每 2 分钟一次（本机实测两次握手间隔 125s 与
+167s），keepalive 越长节奏越慢，所以窗口按它放大。因此 wgtun 把「keepalive
+peer 连续 `max(5 分钟, 4 × keepalive)` 没有任何完成的握手」当作**本机设备
+僵死**（或对端彻底不再应答）的特征，重启该设备 —— 前者唯一可用的修复手段，
+后者则由退避控制代价。两道闸门避免误伤：
+
+- 同一设备上只要有任何一个 peer 最近完成过握手，就证明进程还在收包，此时
+  停滞的是对端，不重启；
+- 重启按 5m → 10m → 20m → 40m → 1h 退避（下一次成功握手即清零），所以
+  「对端服务器真的挂了」不会退化成重启风暴。
+
+每次重启都会以 ERROR 级别记录 peer、静默时长和尝试次数。该机制同样覆盖
+字面量 `ip:port` 端点 —— DDNS 逻辑从不会检查它们，而它们恰恰最容易在无人
+察觉的情况下死掉。
+
 ### fake-IP 与不可信的系统解析器
 
 如果上游路由器（OpenWrt + OpenClash/Mihomo、Surge 等）开了 fake-IP，
@@ -444,7 +471,7 @@ git push origin v0.2.0
 | Linux 没走内核态 | `lsmod \| grep wireguard`；`sudo modprobe wireguard`；或 `WGTUN_BACKEND=kernel` 强制，失败会回退并记日志 |
 | Linux TUI 连不上 socket | 安装时是否以 `sudo` 运行（会把调用者主组写进 unit）；或 `sudo env WGTUN_SOCKET_GROUP=$(id -gn) wgtun daemon --install` |
 | `brew upgrade` 后 daemon 不再启动 | `sudo wgtun daemon --install` —— 0.2.1 及更早版本会把带版本号的 `Cellar/...` 路径写进 plist |
-| 实例已启动但无握手 | 日志页或 `/var/log/wgtun/events.jsonl`；检查端点 DNS |
+| 实例已启动但无握手 | 日志页或 `/var/log/wgtun/events.jsonl`；检查端点 DNS。若日志出现 `wedged receive path`，daemon 已自动重启设备；反复出现说明问题在对端 |
 | 实例反复重启 | 日志页有原因；连续 5 次失败后会自动退避 |
 | 日志出现 `still absent from the device ... giving up` | 该 peer 的公钥与本实例自己的公钥相同；wireguard-go 会返回 `errno=0` 但静默丢弃这个 peer |
 | 开机时 DNS 未就绪，某个 peer 迟迟没有端点 | 预期行为：daemon 会持续重试单 peer 推送，解析器可用前 `unresolved (will retry)` 警告会反复出现 |
